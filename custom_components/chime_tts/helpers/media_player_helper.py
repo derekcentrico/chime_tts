@@ -3,6 +3,7 @@
 import logging
 import time
 import math
+import asyncio
 from homeassistant.core import HomeAssistant, State
 from homeassistant.const import CONF_ENTITY_ID, SERVICE_VOLUME_SET
 from .media_player import ChimeTTSMediaPlayer
@@ -18,6 +19,7 @@ from ..const import (
     ALEXA_MEDIA_PLAYER_PLATFORM,
     SONOS_PLATFORM,
     SPOTIFY_PLATFORM,
+    SQUEEZEBOX_PLATFORM,
     TRANSITION_STEP_MS
 )
 from ..config import (
@@ -126,7 +128,7 @@ class MediaPlayerHelper:
         for media_player in self.media_players:
             if (media_player not in self.get_fade_in_out_media_players()
                 and media_player.target_volume_level not in [-1, media_player.initial_volume_level]
-                and media_player.platform not in (SPOTIFY_PLATFORM, SONOS_PLATFORM)
+                and media_player.platform not in (SPOTIFY_PLATFORM, SONOS_PLATFORM, SQUEEZEBOX_PLATFORM)
             ):
                 set_volume_media_players.append(media_player)
         return set_volume_media_players
@@ -179,7 +181,7 @@ class MediaPlayerHelper:
     def get_is_standard_media_player(self, entity_id):
         """Determine whether a media_player can be used with the media_player.play_media service."""
         platform = self.get_platform_from_entity_id(entity_id)
-        return platform and platform not in (ALEXA_MEDIA_PLAYER_PLATFORM, SONOS_PLATFORM, SPOTIFY_PLATFORM)
+        return platform and platform not in (ALEXA_MEDIA_PLAYER_PLATFORM, SONOS_PLATFORM, SPOTIFY_PLATFORM, SQUEEZEBOX_PLATFORM)
 
     def get_platform_from_entity_id(self, entity_id):
         """Platform for the media_player with entity_id."""
@@ -530,6 +532,14 @@ class MediaPlayerHelper:
             entity_id: str = media_player.entity_id
             current_volume: float = media_player.get_current_volume_level()
             target_volume: float = getattr(media_player, volume_key, 0) if isinstance(volume_key, str) else volume_key
+
+            if (media_player.platform == "cast" and 
+                media_player.get_state() == "playing" and 
+                target_volume > current_volume):
+                
+                _LOGGER.debug("Preventing Google Cast volume spike for %s", entity_id)
+                await hass.services.async_call("media_player", "media_stop", {CONF_ENTITY_ID: entity_id})
+                await asyncio.sleep(0.05)
 
             if target_volume == -1:
                 if volume_key == "initial_volume_level":
