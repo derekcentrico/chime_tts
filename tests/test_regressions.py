@@ -301,3 +301,24 @@ def test_issue_282_cache_hit_does_not_reapply_baked_in_filter():
     # Alexa is the only case that back-fills, and only when not yet compatible.
     assert _should_reapply_conversion_on_cache_hit(FFMPEG_ARGS_ALEXA, False) is True
     assert _should_reapply_conversion_on_cache_hit(FFMPEG_ARGS_ALEXA, True) is False
+
+
+def test_issue_282_conversion_is_part_of_cache_key():
+    """Different audio conversions produce different cache keys (#282, #280).
+
+    The conversion is parsed into the params under "ffmpeg_args", so a cache
+    entry must be unique per conversion; otherwise skipping re-application on a
+    cache hit would serve the wrong conversion.
+    """
+    from custom_components.chime_tts import get_filename_hash_from_service_data
+
+    base = {"message": "hi"}
+    boost = get_filename_hash_from_service_data(
+        {**base, "ffmpeg_args": "-af volume=1.5"}, {}
+    )
+    quiet = get_filename_hash_from_service_data(
+        {**base, "ffmpeg_args": "-af volume=0.5"}, {}
+    )
+    plain = get_filename_hash_from_service_data(base, {})
+    assert boost != quiet
+    assert boost != plain
