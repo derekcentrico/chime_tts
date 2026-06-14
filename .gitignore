@@ -10,7 +10,7 @@ __pycache__
 htmlcov
 
 # virtualenvs
-.venv
+.venv*
 venv
 
 
