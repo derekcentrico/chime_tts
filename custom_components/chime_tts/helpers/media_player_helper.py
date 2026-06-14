@@ -533,10 +533,10 @@ class MediaPlayerHelper:
             current_volume: float = media_player.get_current_volume_level()
             target_volume: float = getattr(media_player, volume_key, 0) if isinstance(volume_key, str) else volume_key
 
-            if (media_player.platform == "cast" and 
-                media_player.get_state() == "playing" and 
+            if (media_player.platform == "cast" and
+                media_player.get_state() == "playing" and
                 target_volume > current_volume):
-                
+
                 _LOGGER.debug("Preventing Google Cast volume spike for %s", entity_id)
                 await hass.services.async_call("media_player", "media_stop", {CONF_ENTITY_ID: entity_id})
                 await asyncio.sleep(0.05)

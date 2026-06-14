@@ -1095,8 +1095,13 @@ def _sonos_volume_set_call(entity_id, volume_percent: int):
         "result": True,
     }
 
-async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, service_data, audio_dict):
-    """Prepare the media_player service calls for audio playback."""
+async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, service_data, audio_dict):  # noqa: C901
+    """Prepare the media_player service calls for audio playback.
+
+    Dispatches per media-player platform (standard, Alexa, Sonos, Squeezebox), so
+    the branch count is inherently high; kept as one function for the shared
+    service-call assembly.
+    """
     helpers.debug_subtitle("Chime TTS playback")
     service_calls = []
 
@@ -1241,7 +1246,7 @@ async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, ser
                 ("s" if len(squeezebox_media_player_entity_ids) != 1 else ""))
             for entity_id in squeezebox_media_player_entity_ids:
                 _LOGGER.debug("     - %s", entity_id)
-            
+
             # If all media_players have same target volume level
             uniform_target_volume = media_player_helper.get_uniform_target_volume_level(squeezebox_media_player_entity_ids)
             if uniform_target_volume != -1:
