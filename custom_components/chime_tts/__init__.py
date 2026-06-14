@@ -1496,7 +1496,7 @@ async def async_add_audio_file_to_cache(hass: HomeAssistant,
         if not audio_cache_dict:
             audio_cache_dict = {}
         local_audio_path = await filesystem_helper.async_get_local_path(hass=hass, file_path=audio_path)
-        if local_audio_path.startswith((_data[WWW_PATH_KEY], "http")):
+        if local_audio_path and local_audio_path.startswith((_data[WWW_PATH_KEY], "http")):
             audio_cache_dict[PUBLIC_PATH_KEY] = audio_path
         else:
             audio_cache_dict[LOCAL_PATH_KEY] = audio_path

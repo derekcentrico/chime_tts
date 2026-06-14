@@ -546,7 +546,7 @@ class ChimeTTSHelper:
         """Convert audio file with FFmpeg and provided arguments."""
 
         local_file_path = await filesystem_helper.async_get_local_path(hass, file_path)
-        if not await hass.async_add_executor_job(filesystem_helper.filepath_exists_locally, hass, local_file_path):
+        if not (local_file_path and await hass.async_add_executor_job(os.path.isfile, local_file_path)):
             _LOGGER.warning("Unable to perform FFmpeg conversion: source file not found on file system: %s", local_file_path)
             return False
 

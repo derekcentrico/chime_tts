@@ -386,10 +386,7 @@ class FilesystemHelper:
         try:
             # Validate file path
             file_path = await self.async_get_local_path(hass=hass, file_path=file_path)
-            if not file_path or not (
-                await hass.async_add_executor_job(os.path.isfile, file_path)
-                and await hass.async_add_executor_job(self.path_exists, file_path)
-            ):
+            if not file_path or not await hass.async_add_executor_job(os.path.isfile, file_path):
                 _LOGGER.debug("Unable to convert audio. File not found: %s", file_path)
                 return False
 
