@@ -241,3 +241,22 @@ def test_issue_307_styled_cloud_voice_resolves_language():
     )
     assert styled is not None
     assert styled == plain
+
+
+def test_cloud_entity_id_form_language_handled():
+    """Nabu cloud as a full entity id still gets language moved out of options."""
+    helper = TTSAudioHelper()
+    options = {"language": "fr"}
+    result = helper._adjust_language_and_voice("tts.home_assistant_cloud", "", options)
+    assert result == "fr"
+    assert "language" not in options
+
+
+def test_non_string_voice_does_not_crash_cloud_language_lookup():
+    """A non-string voice must not raise in the cloud language lookup."""
+    helper = TTSAudioHelper()
+    # Should simply skip the lookup and return None, not raise AttributeError.
+    assert (
+        helper._adjust_language_and_voice(NABU_CASA_CLOUD_TTS, "", {"voice": 123})
+        is None
+    )

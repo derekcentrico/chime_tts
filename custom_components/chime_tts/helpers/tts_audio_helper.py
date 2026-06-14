@@ -86,6 +86,11 @@ class TTSAudioHelper:
 
     def _adjust_language_and_voice(self, tts_platform, language, tts_options):
         voice = tts_options.get("voice", None)
+        # Nabu Casa cloud can arrive as a full entity id (tts.home_assistant_cloud)
+        # now that platform matching keeps entity ids; map it to the constant so
+        # the language handling below still applies.
+        if tts_platform and tts_platform.lower() in ("tts.home_assistant_cloud", "tts.cloud"):
+            tts_platform = NABU_CASA_CLOUD_TTS
         language_aware_platforms = [
             AMAZON_POLLY,
             GOOGLE_TRANSLATE,
@@ -114,7 +119,7 @@ class TTSAudioHelper:
         else:
             language = None
 
-        if tts_platform == NABU_CASA_CLOUD_TTS and voice and not language:
+        if tts_platform == NABU_CASA_CLOUD_TTS and isinstance(voice, str) and voice and not language:
             # Styled cloud voices arrive as "name||style"; match on the base name
             # so the style suffix does not break the language lookup (#307).
             base_voice = voice.split("||")[0]
