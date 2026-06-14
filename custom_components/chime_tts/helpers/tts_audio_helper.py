@@ -39,13 +39,15 @@ filesystem_helper = FilesystemHelper()
 _LOGGER = logging.getLogger(__name__)
 
 
-def _clamped_tts_timeout(tts_timeout: int, queue_timeout: int) -> int:
-    """Cap the per-platform TTS timeout so a fallback fits within the queue timeout.
+def _clamped_tts_timeout(tts_timeout: int, queue_timeout: int, has_pending_fallback: bool) -> int:
+    """Cap the per-platform TTS timeout so a pending fallback fits in the queue window.
 
-    The queue cancels the whole service call after queue_timeout. If the primary
-    TTS generation consumes most of that window, the fallback never runs (#232);
-    reserve room for both the primary and a fallback attempt.
+    The queue cancels the whole service call after queue_timeout. When a fallback
+    platform could still run, reserve room for both attempts so the fallback is
+    not cancelled (#232). With no pending fallback, the full timeout is kept.
     """
+    if not has_pending_fallback:
+        return tts_timeout
     max_timeout = max(1, (queue_timeout - 2) // 2)
     return min(tts_timeout, max_timeout)
 
@@ -54,7 +56,7 @@ class TTSAudioHelper:
 
     _data = {}
 
-    async def async_request_tts_audio(self, hass: HomeAssistant, tts_platform: str, message: str, language: str, cache: bool, options: dict):
+    async def async_request_tts_audio(self, hass: HomeAssistant, tts_platform: str, message: str, language: str, cache: bool, options: dict, is_fallback: bool = False):
         """Send an API request for TTS audio and return the audio file's local filepath."""
         start_time = datetime.now()
 
@@ -65,7 +67,7 @@ class TTSAudioHelper:
 
         # Step 2: Generate TTS audio
         media_source_id, audio_data = await self._generate_tts_audio(
-            hass, tts_platform, message, language, cache, tts_options
+            hass, tts_platform, message, language, cache, tts_options, is_fallback
         )
 
         # Step 3: Process the audio data
@@ -146,7 +148,7 @@ class TTSAudioHelper:
                     )
         return language
 
-    async def _generate_tts_audio(self, hass: HomeAssistant, tts_platform, message, language, cache, tts_options):
+    async def _generate_tts_audio(self, hass: HomeAssistant, tts_platform, message, language, cache, tts_options, is_fallback: bool = False):
         media_source_id = None
         audio_data = None
         if not tts_platform.startswith("tts."):
@@ -154,7 +156,10 @@ class TTSAudioHelper:
         try:
             timeout = int(self._data.get(TTS_TIMEOUT_KEY, TTS_TIMEOUT_DEFAULT))
             queue_timeout = int(self._data.get(QUEUE_TIMEOUT_KEY, QUEUE_TIMEOUT_DEFAULT))
-            clamped = _clamped_tts_timeout(timeout, queue_timeout)
+            # Only reserve room for a fallback when one is configured and this is
+            # not already the fallback attempt.
+            has_pending_fallback = bool(self._data.get(FALLBACK_TTS_PLATFORM_KEY)) and not is_fallback
+            clamped = _clamped_tts_timeout(timeout, queue_timeout, has_pending_fallback)
             if clamped != timeout:
                 _LOGGER.debug(
                     "Clamping TTS generation timeout from %ss to %ss so a fallback fits within the %ss queue timeout",
@@ -239,6 +244,7 @@ class TTSAudioHelper:
                 language=language,
                 cache=cache,
                 options=options,
+                is_fallback=True,
             )
         _LOGGER.error("...audio_data generation failed")
         return None

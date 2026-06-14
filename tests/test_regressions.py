@@ -333,9 +333,12 @@ def test_issue_232_tts_timeout_clamped_to_leave_room_for_fallback():
         _clamped_tts_timeout,
     )
 
-    # A 30s primary under a 60s queue is capped so primary + fallback both fit.
-    assert _clamped_tts_timeout(30, 60) == 29
+    # With a pending fallback, a 30s primary under a 60s queue is capped so both fit.
+    assert _clamped_tts_timeout(30, 60, True) == 29
     # A timeout already under the cap is unchanged.
-    assert _clamped_tts_timeout(10, 60) == 10
+    assert _clamped_tts_timeout(10, 60, True) == 10
     # Never drops below 1 second.
-    assert _clamped_tts_timeout(30, 1) == 1
+    assert _clamped_tts_timeout(30, 1, True) == 1
+    # With no pending fallback, the full timeout is kept (not halved).
+    assert _clamped_tts_timeout(30, 60, False) == 30
+    assert _clamped_tts_timeout(55, 60, False) == 55
