@@ -20,6 +20,8 @@ install: # install the test/lint/type stack into the active venv
 	pip install -r requirements_test.txt
 
 venv-latest: # build .venv314 (Python 3.14) with the latest Home Assistant for testing
+	# Latest HA (2026.6.x) declares requires-python >=3.14.2, so 3.14 is required
+	# here; 3.13 resolves to an older HA and would not test the current release.
 	uv venv --python 3.14 .venv314
 	. .venv314/bin/activate && uv pip install -r requirements_test.txt
 	@echo "Activate with: . .venv314/bin/activate"
