@@ -260,3 +260,31 @@ def test_non_string_voice_does_not_crash_cloud_language_lookup():
         helper._adjust_language_and_voice(NABU_CASA_CLOUD_TTS, "", {"voice": 123})
         is None
     )
+
+
+class _ExecHass:
+    """Minimal hass that runs executor jobs inline, for offload tests."""
+
+    async def async_add_executor_job(self, func, *args):
+        return func(*args)
+
+
+async def test_issue_318_async_get_local_path_offloads(monkeypatch):
+    """async_get_local_path runs get_local_path through the executor (#318, #258)."""
+    from custom_components.chime_tts.helpers.filesystem import FilesystemHelper
+
+    helper = FilesystemHelper()
+    hass = _ExecHass()
+    calls = {"n": 0}
+    original = helper.get_local_path
+
+    def _tracked(h, file_path=""):
+        calls["n"] += 1
+        return original(h, file_path)
+
+    monkeypatch.setattr(helper, "get_local_path", _tracked)
+
+    # An absolute path short-circuits inside get_local_path without blocking I/O.
+    result = await helper.async_get_local_path(hass, "/media/chime.mp3")
+    assert result == "/media/chime.mp3"
+    assert calls["n"] == 1, "get_local_path should be invoked via the executor"
