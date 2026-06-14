@@ -371,10 +371,18 @@ class ChimeTTSHelper:
             return None
         target = requested.lower()
         bare = target[4:] if target.startswith("tts.") else target
+        # Exact match on a provider name or full entity id.
         for inst in installed:
             il = inst.lower()
-            if il == target or il == bare or il == f"tts.{bare}" or il.startswith(f"tts.{bare}_"):
+            if il == target or il == bare or il == f"tts.{bare}":
                 return inst
+        # A bare provider name maps to its entity (tts.<bare>_<suffix>), but only
+        # when unambiguous. A broad name like "google" prefixes several distinct
+        # providers (translate, generative_ai); leave those to the fallback.
+        prefix = f"tts.{bare}_"
+        suffix_matches = [inst for inst in installed if inst.lower().startswith(prefix)]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0]
         return None
 
     def _match_google_fallback(self, requested: str, installed: list[str]):
@@ -396,7 +404,6 @@ class ChimeTTSHelper:
             _LOGGER.warning("The TTS platform '%s' was not found. Using '%s' instead.", requested, GOOGLE_TRANSLATE)
             return GOOGLE_TRANSLATE
         return None
-        return selected_platform
 
 
     def get_stripped_tts_platform(self, tts_provider = ""):

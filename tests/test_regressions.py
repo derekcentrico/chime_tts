@@ -125,3 +125,17 @@ def test_google_translate_fallback_for_unmatched_google_request():
     hass = _FakeHass(entity_ids=["tts.google_translate_en_com"])
     selected = helper.get_tts_platform(hass, tts_platform="tts.google_cloud")
     assert selected == "tts.google_translate_en_com"
+
+
+def test_ambiguous_google_name_does_not_pick_generative_ai():
+    """A bare 'google' must not silently resolve to a generative-AI entity."""
+    helper = ChimeTTSHelper()
+    hass = _FakeHass(
+        entity_ids=["tts.google_generative_ai_01jabc", "tts.google_translate_en_com"]
+    )
+    # Bare "google" prefixes both providers, so it is ambiguous and falls through
+    # to the Google Translate fallback rather than matching generative AI.
+    assert (
+        helper.get_tts_platform(hass, tts_platform="google")
+        == "tts.google_translate_en_com"
+    )
