@@ -7,7 +7,18 @@ unfixed code and passes after the fix.
 import yaml
 
 from custom_components.chime_tts.helpers.helpers import ChimeTTSHelper
+from custom_components.chime_tts.helpers.media_player_helper import MediaPlayerHelper
 from custom_components.chime_tts.helpers.services_helper import ChimeTTSServicesHelper
+
+
+class _FakeConfig:
+    def __init__(self, media_dirs):
+        self.media_dirs = media_dirs
+
+
+class _FakeMediaHass:
+    def __init__(self, media_dirs):
+        self.config = _FakeConfig(media_dirs)
 
 
 class _FakeState:
@@ -139,3 +150,49 @@ def test_ambiguous_google_name_does_not_pick_generative_ai():
         helper.get_tts_platform(hass, tts_platform="google")
         == "tts.google_translate_en_com"
     )
+
+
+def test_issue_253_media_content_id_keeps_full_relative_path():
+    """The relative path is preserved exactly, not off-by-one (#253)."""
+    helper = MediaPlayerHelper()
+    hass = _FakeMediaHass({"media": "/media"})
+    cid = helper.get_media_content_id(hass, "/media/sounds/doorbell.mp3")
+    assert cid == "media-source://media_source/media/sounds/doorbell.mp3"
+
+
+def test_issue_289_longest_media_dir_prefix_wins():
+    """The directory with the longest matching path is chosen, regardless of its name (#289)."""
+    helper = MediaPlayerHelper()
+    # "n"'s short path would beat "media"'s longer path under the old
+    # name-length-vs-path-length comparison.
+    hass = _FakeMediaHass({"media": "/media/sub", "n": "/media"})
+    cid = helper.get_media_content_id(hass, "/media/sub/chime.mp3")
+    assert cid == "media-source://media_source/media/chime.mp3"
+
+
+def test_issue_289_outside_media_dir_returns_none_not_garbage():
+    """A file outside any media dir returns None instead of a corrupt id (#289)."""
+    helper = MediaPlayerHelper()
+    hass = _FakeMediaHass({"media": "/media"})
+    assert helper.get_media_content_id(hass, "/config/www/chime.mp3") is None
+
+
+def test_issue_289_sibling_prefix_directory_not_matched():
+    """A dir /media must not claim a sibling path like /media-other (#289)."""
+    helper = MediaPlayerHelper()
+    hass = _FakeMediaHass({"media": "/media"})
+    assert helper.get_media_content_id(hass, "/media-other/chime.mp3") is None
+
+
+def test_media_content_id_trailing_slash_media_dir():
+    """A configured media dir with a trailing slash still resolves correctly."""
+    helper = MediaPlayerHelper()
+    hass = _FakeMediaHass({"media": "/media/"})
+    cid = helper.get_media_content_id(hass, "/media/chime.mp3")
+    assert cid == "media-source://media_source/media/chime.mp3"
+
+
+def test_media_content_id_missing_path_returns_none():
+    helper = MediaPlayerHelper()
+    hass = _FakeMediaHass({"media": "/media"})
+    assert helper.get_media_content_id(hass, "") is None
