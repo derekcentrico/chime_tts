@@ -1140,13 +1140,21 @@ async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, ser
             for entity_id in sonos_media_player_entity_ids:
                 _LOGGER.debug("     - %s", entity_id)
 
-            # If all media_players have same target volume level
-            uniform_target_volume = int(media_player_helper.get_uniform_target_volume_level(sonos_media_player_entity_ids) * 100)
-            if uniform_target_volume != -1:
+            # If all media_players have same target volume level. Check the -1
+            # "not uniform" sentinel on the raw level before scaling to a
+            # percentage, otherwise it becomes -100 and the per-player branch
+            # below never runs.
+            uniform_level = media_player_helper.get_uniform_target_volume_level(sonos_media_player_entity_ids)
+            if uniform_level != -1:
+                uniform_target_volume = int(uniform_level * 100)
                 sonos_service_data[CONF_ENTITY_ID] = sonos_media_player_entity_ids
                 if uniform_target_volume >= 0:
                     sonos_service_data["extra"] = {"volume": uniform_target_volume}
-                    service_calls.append(_sonos_volume_set_call(sonos_media_player_entity_ids, uniform_target_volume))
+                    # Set the volume explicitly only when the Sonos snapshot/restore
+                    # is enabled to return it afterwards; without restore the announce
+                    # volume would persist (#275, #256).
+                    if SONOS_SNAPSHOT_ENABLED:
+                        service_calls.append(_sonos_volume_set_call(sonos_media_player_entity_ids, uniform_target_volume))
                 service_calls.append({
                     "domain": "media_player",
                     "service": SERVICE_PLAY_MEDIA,
@@ -1162,7 +1170,8 @@ async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, ser
                     individual_service_data[CONF_ENTITY_ID] = media_player.entity_id
                     if volume >= 0:
                         individual_service_data["extra"] = {"volume": volume}
-                        service_calls.append(_sonos_volume_set_call(media_player.entity_id, volume))
+                        if SONOS_SNAPSHOT_ENABLED:
+                            service_calls.append(_sonos_volume_set_call(media_player.entity_id, volume))
                     service_calls.append({
                         "domain": "media_player",
                         "service": SERVICE_PLAY_MEDIA,
