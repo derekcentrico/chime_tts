@@ -1061,6 +1061,24 @@ async def async_play_media(
 
     return play_result
 
+def _sonos_volume_set_call(entity_id, volume_percent: int):
+    """Build an explicit volume_set call for Sonos before an announcement.
+
+    Some Sonos models ignore the announce `extra.volume`, so the volume is set
+    directly first; the snapshot/restore around the announcement returns the
+    previous level (#275, #256).
+    """
+    return {
+        "domain": "media_player",
+        "service": "volume_set",
+        "service_data": {
+            CONF_ENTITY_ID: entity_id,
+            "volume_level": round(max(0, min(100, volume_percent)) / 100, 2),
+        },
+        "blocking": True,
+        "result": True,
+    }
+
 async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, service_data, audio_dict):
     """Prepare the media_player service calls for audio playback."""
     helpers.debug_subtitle("Chime TTS playback")
@@ -1128,6 +1146,7 @@ async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, ser
                 sonos_service_data[CONF_ENTITY_ID] = sonos_media_player_entity_ids
                 if uniform_target_volume >= 0:
                     sonos_service_data["extra"] = {"volume": uniform_target_volume}
+                    service_calls.append(_sonos_volume_set_call(sonos_media_player_entity_ids, uniform_target_volume))
                 service_calls.append({
                     "domain": "media_player",
                     "service": SERVICE_PLAY_MEDIA,
@@ -1143,6 +1162,7 @@ async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, ser
                     individual_service_data[CONF_ENTITY_ID] = media_player.entity_id
                     if volume >= 0:
                         individual_service_data["extra"] = {"volume": volume}
+                        service_calls.append(_sonos_volume_set_call(media_player.entity_id, volume))
                     service_calls.append({
                         "domain": "media_player",
                         "service": SERVICE_PLAY_MEDIA,
