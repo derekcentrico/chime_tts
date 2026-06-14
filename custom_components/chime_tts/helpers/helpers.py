@@ -72,7 +72,10 @@ class ChimeTTSHelper:
         tts_platform = str(data.get("tts_platform", ""))
         tts_speed = float(data.get("tts_playback_speed", data.get("tts_speed", 100)) or 100)
         tts_pitch = data.get("tts_pitch", 0) or 0
-        repeat = int(data.get("repeat", 1) or 1)
+        try:
+            repeat = max(int(data.get("repeat", 1) or 1), 1)
+        except (ValueError, TypeError):
+            repeat = 1
         pre_script = data.get("pre_script", None)
         post_script = data.get("post_script", None)
         volume_level = data.get(ATTR_MEDIA_VOLUME_LEVEL, -1) or -1

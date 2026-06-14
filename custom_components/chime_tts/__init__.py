@@ -281,7 +281,7 @@ async def async_run_script(hass: HomeAssistant, script):
     """Run a script entity before or after playback, if one is configured (#310)."""
     if not script:
         return
-    domain, _, name = str(script).partition(".")
+    domain, _, name = str(script).strip().partition(".")
     if domain != "script" or not name:
         _LOGGER.warning("chime_tts: '%s' is not a script entity (expected script.<name>)", script)
         return
@@ -639,6 +639,14 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         except Exception as e:
             raise RuntimeError(f"An unexpected error occurred: {e}")
 
+        # Repeat the whole assembled chime + message audio (#314). Done at the
+        # audio level so the chimes repeat too, not just the message segments.
+        repeat = params.get("repeat", 1)
+        repeat = max(repeat, 1) if isinstance(repeat, int) else 1
+        if repeat > 1:
+            new_audio_segment = new_audio_segment * repeat
+            await filesystem_helper.async_export_audio(new_audio_segment, new_audio_file)
+
         duration = len(new_audio_segment) / 1000.0
         audio_dict[AUDIO_DURATION_KEY] = duration
         audio_dict[LOCAL_PATH_KEY if is_local else PUBLIC_PATH_KEY] = new_audio_file
@@ -832,12 +840,6 @@ async def async_process_segments(hass, message, output_audio=None, params={}, op
     segments = helpers.parse_message(message)
     if segments is None or len(segments) == 0:
         return output_audio
-
-    # Repeat the whole chime + message sequence `repeat` times (#314).
-    repeat = params.get("repeat", 1)
-    repeat = max(repeat, 1) if isinstance(repeat, int) else 1
-    if repeat > 1:
-        segments = segments * repeat
 
     for index, segment in enumerate(segments):
         segment_cache: bool = segment.get("cache", params.get("cache", False))
