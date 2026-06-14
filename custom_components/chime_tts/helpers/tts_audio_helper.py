@@ -11,6 +11,8 @@ from .helpers import ChimeTTSHelper
 from ..const import (
     TTS_TIMEOUT_KEY,
     TTS_TIMEOUT_DEFAULT,
+    QUEUE_TIMEOUT_KEY,
+    QUEUE_TIMEOUT_DEFAULT,
     TTS_PLATFORM_KEY,
      FALLBACK_TTS_PLATFORM_KEY,
     AMAZON_POLLY,
@@ -35,6 +37,17 @@ helpers = ChimeTTSHelper()
 filesystem_helper = FilesystemHelper()
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _clamped_tts_timeout(tts_timeout: int, queue_timeout: int) -> int:
+    """Cap the per-platform TTS timeout so a fallback fits within the queue timeout.
+
+    The queue cancels the whole service call after queue_timeout. If the primary
+    TTS generation consumes most of that window, the fallback never runs (#232);
+    reserve room for both the primary and a fallback attempt.
+    """
+    max_timeout = max(1, (queue_timeout - 2) // 2)
+    return min(tts_timeout, max_timeout)
 
 class TTSAudioHelper:
     """Helper class for generating TTS Audio in Chime TTS."""
@@ -140,6 +153,16 @@ class TTSAudioHelper:
             tts_platform = f"tts.{tts_platform}"
         try:
             timeout = int(self._data.get(TTS_TIMEOUT_KEY, TTS_TIMEOUT_DEFAULT))
+            queue_timeout = int(self._data.get(QUEUE_TIMEOUT_KEY, QUEUE_TIMEOUT_DEFAULT))
+            clamped = _clamped_tts_timeout(timeout, queue_timeout)
+            if clamped != timeout:
+                _LOGGER.debug(
+                    "Clamping TTS generation timeout from %ss to %ss so a fallback fits within the %ss queue timeout",
+                    timeout,
+                    clamped,
+                    queue_timeout,
+                )
+                timeout = clamped
             media_source_id = await asyncio.wait_for(
                 asyncio.to_thread(
                     tts.media_source.generate_media_source_id,

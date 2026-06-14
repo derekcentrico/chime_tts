@@ -325,3 +325,17 @@ def test_issue_282_conversion_is_part_of_cache_key():
     plain = get_filename_hash_from_service_data(base, {})
     assert boost != quiet
     assert boost != plain
+
+
+def test_issue_232_tts_timeout_clamped_to_leave_room_for_fallback():
+    """The per-platform TTS timeout leaves room for a fallback within the queue timeout (#232)."""
+    from custom_components.chime_tts.helpers.tts_audio_helper import (
+        _clamped_tts_timeout,
+    )
+
+    # A 30s primary under a 60s queue is capped so primary + fallback both fit.
+    assert _clamped_tts_timeout(30, 60) == 29
+    # A timeout already under the cap is unchanged.
+    assert _clamped_tts_timeout(10, 60) == 10
+    # Never drops below 1 second.
+    assert _clamped_tts_timeout(30, 1) == 1
