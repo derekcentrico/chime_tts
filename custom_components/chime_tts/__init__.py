@@ -277,6 +277,19 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
 
     return True
 
+async def async_run_script(hass: HomeAssistant, script):
+    """Run a script entity before or after playback, if one is configured (#310)."""
+    if not script:
+        return
+    domain, _, name = str(script).partition(".")
+    if domain != "script" or not name:
+        _LOGGER.warning("chime_tts: '%s' is not a script entity (expected script.<name>)", script)
+        return
+    try:
+        await hass.services.async_call("script", name, blocking=True)
+    except Exception as error:
+        _LOGGER.warning("chime_tts: error running script '%s': %s", script, error)
+
 async def async_prepare_media(hass: HomeAssistant, params, options, media_players_array: list[ChimeTTSMediaPlayer], is_say_url, start_time):
     """Prepare and play media."""
 
@@ -295,6 +308,9 @@ async def async_prepare_media(hass: HomeAssistant, params, options, media_player
 
         if is_say_url is False:
 
+            # Optional script to run before playback (#310)
+            await async_run_script(hass, params.get("pre_script"))
+
             # Play audio with service_data
             play_result = await async_play_media(
                 hass,
@@ -309,6 +325,9 @@ async def async_prepare_media(hass: HomeAssistant, params, options, media_player
                     params["final_delay"],
                     media_players_array,
                 )
+
+            # Optional script to run after playback (#310)
+            await async_run_script(hass, params.get("post_script"))
 
             # Remove temporary local generated mp3
             if not bool(params.get("cache", False)):
@@ -813,6 +832,12 @@ async def async_process_segments(hass, message, output_audio=None, params={}, op
     segments = helpers.parse_message(message)
     if segments is None or len(segments) == 0:
         return output_audio
+
+    # Repeat the whole chime + message sequence `repeat` times (#314).
+    repeat = params.get("repeat", 1)
+    repeat = max(repeat, 1) if isinstance(repeat, int) else 1
+    if repeat > 1:
+        segments = segments * repeat
 
     for index, segment in enumerate(segments):
         segment_cache: bool = segment.get("cache", params.get("cache", False))
@@ -1546,7 +1571,8 @@ def get_filename_hash_from_service_data(params: dict, options: dict):
         "crossfade",
         "tts_playback_speed",
         "tts_speed",
-        "tts_pitch"
+        "tts_pitch",
+        "repeat",
     ]
     for param in relevant_params:
         for dictionary in [params, options]:
