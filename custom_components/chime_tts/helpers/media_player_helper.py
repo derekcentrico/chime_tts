@@ -233,18 +233,25 @@ class MediaPlayerHelper:
             _LOGGER.error("Audio file path missing in call to get_media_content_id")
             return None
 
+        if hass is None or hass.config is None:
+            return None
         media_dirs = hass.config.media_dirs or {}
 
-        # Pick the media directory whose path is the longest prefix of file_path.
-        # The previous code compared the directory NAME length against the PATH
-        # length and stripped len("/" + path), which selected the wrong directory
-        # and dropped a character from the relative path (#289, #253).
+        # Pick the media directory whose path is the longest prefix of file_path,
+        # matching only on a path boundary so a dir like /media does not also claim
+        # a sibling such as /media-other. The previous code compared the directory
+        # NAME length against the PATH length and stripped len("/" + path), which
+        # selected the wrong directory and dropped a character from the relative
+        # path (#289, #253).
         matched_name = ""
         matched_path = ""
         for name, path in media_dirs.items():
-            if path and file_path.startswith(path) and len(path) > len(matched_path):
+            if not path:
+                continue
+            root = path.rstrip("/")
+            if (file_path == root or file_path.startswith(root + "/")) and len(root) > len(matched_path):
                 matched_name = name
-                matched_path = path
+                matched_path = root
 
         if not matched_path:
             _LOGGER.debug(

@@ -177,6 +177,21 @@ def test_issue_289_outside_media_dir_returns_none_not_garbage():
     assert helper.get_media_content_id(hass, "/config/www/chime.mp3") is None
 
 
+def test_issue_289_sibling_prefix_directory_not_matched():
+    """A dir /media must not claim a sibling path like /media-other (#289)."""
+    helper = MediaPlayerHelper()
+    hass = _FakeMediaHass({"media": "/media"})
+    assert helper.get_media_content_id(hass, "/media-other/chime.mp3") is None
+
+
+def test_media_content_id_trailing_slash_media_dir():
+    """A configured media dir with a trailing slash still resolves correctly."""
+    helper = MediaPlayerHelper()
+    hass = _FakeMediaHass({"media": "/media/"})
+    cid = helper.get_media_content_id(hass, "/media/chime.mp3")
+    assert cid == "media-source://media_source/media/chime.mp3"
+
+
 def test_media_content_id_missing_path_returns_none():
     helper = MediaPlayerHelper()
     hass = _FakeMediaHass({"media": "/media"})
