@@ -45,7 +45,7 @@ class ChimeTTSServicesHelper:
         (SERVICE_SAY_URL, "end_chime_path"),
     )
 
-    async def _async_update_chime_lists(self, hass: HomeAssistant, custom_chime_options: list):
+    async def _async_update_chime_lists(self, hass: HomeAssistant, custom_chime_options: list | None):
         """Modify the chime path drop down options."""
 
         services_yaml = await self._async_parse_services_yaml()
@@ -77,19 +77,20 @@ class ChimeTTSServicesHelper:
             await self._async_save_services_yaml(services_yaml)
 
     @staticmethod
-    def _build_chime_options(custom_chime_options: list) -> list:
+    def _build_chime_options(custom_chime_options: list | None) -> list:
         """Return the sorted chime options with every label and value as a str.
 
         HA's select selector requires string label/value pairs. Custom chime
         names come from filenames and can look like numbers or booleans; without
         coercion YAML round-trips them into ints/bools and HA rejects the file
-        (issue #294). Malformed entries are dropped.
+        (issue #294). Entries missing a label or value are dropped rather than
+        coerced to the string "None".
         """
         merged = list(DEFAULT_CHIME_OPTIONS) + list(custom_chime_options or [])
         options = [
             {"label": str(o["label"]), "value": str(o["value"])}
             for o in merged
-            if isinstance(o, dict) and "label" in o and "value" in o
+            if isinstance(o, dict) and o.get("label") is not None and o.get("value") is not None
         ]
         options.sort(key=lambda x: x["label"].lower())
         if not custom_chime_options:

@@ -24,9 +24,11 @@ jobs:
           - label: "py3.13 / HA mid"
             python-version: "3.13"
             phccc: "pytest-homeassistant-custom-component==0.13.200"
-          # Latest HA on 3.13.
-          - label: "py3.13 / HA latest"
-            python-version: "3.13"
+          # Latest HA needs Python 3.14: recent pytest-homeassistant-custom-component
+          # releases declare requires-python >=3.14, so on 3.13 pip backtracks to an
+          # older release and this row would not exercise the latest HA API.
+          - label: "py3.14 / HA latest"
+            python-version: "3.14"
             phccc: "pytest-homeassistant-custom-component"
     steps:
       - name: "Checkout"

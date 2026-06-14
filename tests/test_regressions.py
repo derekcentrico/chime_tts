@@ -16,6 +16,7 @@ def test_issue_294_build_chime_options_coerces_values_to_str():
         {"label": 12, "value": 12},  # adversarial non-str entry
         {"label": "yes", "value": "yes"},
         {"value": "/missing/label.mp3"},  # malformed: no label, dropped
+        {"label": "no-value", "value": None},  # None value, dropped (not "None")
         "not-a-dict",  # malformed, dropped
     ]
     options = ChimeTTSServicesHelper._build_chime_options(custom)
@@ -26,8 +27,11 @@ def test_issue_294_build_chime_options_coerces_values_to_str():
         assert isinstance(option["value"], str)
 
     values = [o["value"] for o in options]
+    labels = [o["label"] for o in options]
     assert "12" in values, "int value should be coerced to str"
-    assert "/missing/label.mp3" not in values, "malformed entry should be dropped"
+    assert "/missing/label.mp3" not in values, "entry without a label should be dropped"
+    assert "no-value" not in labels, "entry with a None value should be dropped"
+    assert "None" not in values, "None must not be coerced to the string 'None'"
 
 
 def test_issue_294_round_trips_through_yaml_as_str():
