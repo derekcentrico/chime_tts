@@ -548,7 +548,11 @@ async def async_get_playback_audio_path(params: dict, options: dict):
 
     # Produce local and/or public mp3s?
     alexa_media_player_count = public_count = media_player_helper.get_alexa_media_players_count()
-    is_public = public_count > 0 or (entity_ids is None or len(entity_ids) == 0)
+    # Generate a public (unauthenticated) file for Sonos too, so it can play the
+    # public URL instead of the 1-day-signed media-source URL that Sonos re-fetches
+    # after expiry and that triggers HA auth bans (home-assistant/core#88714).
+    has_sonos = len(media_player_helper.get_media_players_of_platform(entity_ids, SONOS_PLATFORM)) > 0
+    is_public = public_count > 0 or has_sonos or (entity_ids is None or len(entity_ids) == 0)
     is_local = entity_ids is not None and len(entity_ids) > 0 and public_count != len(entity_ids)
 
     filepath_hash = get_filename_hash_from_service_data({**params}, {**options})
@@ -1104,6 +1108,16 @@ async def async_play_media(
 
     return play_result
 
+def _sonos_content_id(public_url, media_source_id):
+    """Pick the Sonos media content id, preferring an unauthenticated public URL.
+
+    Sonos re-fetches the last-played URL; a signed `media-source://` URL carries a
+    1-day token, so the later re-fetch fails auth and HA bans the Sonos IP
+    (home-assistant/core#88714). A public `/local/` URL needs no auth, so its
+    re-fetch is harmless. Falls back to the media-source id when no public URL.
+    """
+    return public_url or media_source_id
+
 def _sonos_volume_set_call(entity_id, volume_percent: int):
     """Build an explicit volume_set call for Sonos before an announcement.
 
@@ -1181,7 +1195,12 @@ async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, ser
     # Sonos media_players
     if len(sonos_media_player_entity_ids) > 0:
         sonos_service_data = service_data.copy()
-        if sonos_service_data[ATTR_MEDIA_CONTENT_ID] is None:
+        # Prefer an unauthenticated public URL for Sonos. The signed media-source
+        # URL carries a 1-day token that Sonos re-fetches after it expires, which
+        # triggers HA "invalid authentication" bans (home-assistant/core#88714).
+        sonos_content_id = _sonos_content_id(audio_dict.get(PUBLIC_PATH_KEY, None), sonos_service_data[ATTR_MEDIA_CONTENT_ID])
+        sonos_service_data[ATTR_MEDIA_CONTENT_ID] = sonos_content_id
+        if sonos_content_id is None:
             _LOGGER.warning("Error calling `media_player.play_media` service: No media content id found")
         else:
             _LOGGER.debug(
