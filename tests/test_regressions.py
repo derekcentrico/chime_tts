@@ -379,3 +379,22 @@ async def test_issue_310_runs_configured_script_before_after_tts():
     await async_run_script(hass, "light.kitchen")
     await async_run_script(hass, None)
     assert calls == []
+
+
+def test_issue_88714_sonos_prefers_public_url():
+    """Sonos uses the unauthenticated public URL when available, else media-source (#88714)."""
+    from custom_components.chime_tts import _sonos_content_id
+
+    assert (
+        _sonos_content_id(
+            "http://ha.local/local/chime.mp3",
+            "media-source://media_source/media/chime.mp3",
+        )
+        == "http://ha.local/local/chime.mp3"
+    )
+    # No public URL: fall back to the media-source id.
+    assert (
+        _sonos_content_id(None, "media-source://media_source/media/chime.mp3")
+        == "media-source://media_source/media/chime.mp3"
+    )
+    assert _sonos_content_id(None, None) is None
