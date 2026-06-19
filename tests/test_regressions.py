@@ -379,3 +379,235 @@ async def test_issue_310_runs_configured_script_before_after_tts():
     await async_run_script(hass, "light.kitchen")
     await async_run_script(hass, None)
     assert calls == []
+
+
+def test_issue_88714_sonos_prefers_public_url():
+    """Sonos uses the unauthenticated public URL when available, else media-source (#88714)."""
+    from custom_components.chime_tts import _sonos_content_id
+
+    assert (
+        _sonos_content_id(
+            "http://ha.local/local/chime.mp3",
+            "media-source://media_source/media/chime.mp3",
+        )
+        == "http://ha.local/local/chime.mp3"
+    )
+    # No public URL: fall back to the media-source id.
+    assert (
+        _sonos_content_id(None, "media-source://media_source/media/chime.mp3")
+        == "media-source://media_source/media/chime.mp3"
+    )
+    assert _sonos_content_id(None, None) is None
+
+
+def test_sonos_volume_set_carries_settle_delay():
+    """The Sonos volume_set call requests a settle delay before play_media."""
+    from custom_components.chime_tts import _sonos_volume_set_call
+    from custom_components.chime_tts.const import SONOS_VOLUME_SETTLE_MS
+
+    call = _sonos_volume_set_call("media_player.kitchen", 50)
+    assert call["delay_after"] == SONOS_VOLUME_SETTLE_MS
+    assert SONOS_VOLUME_SETTLE_MS > 0
+
+
+def test_cast_delay_is_part_of_cache_key():
+    """A baked-in Cast leading silence makes the cached file unique per delay."""
+    from custom_components.chime_tts import get_filename_hash_from_service_data
+
+    base = {"message": "hi"}
+    assert get_filename_hash_from_service_data(
+        base, {}
+    ) != get_filename_hash_from_service_data({**base, "cast_delay": 2000}, {})
+    assert get_filename_hash_from_service_data(
+        {**base, "cast_delay": 1000}, {}
+    ) != get_filename_hash_from_service_data({**base, "cast_delay": 2000}, {})
+
+
+async def test_fire_media_service_calls_honors_delay_after(monkeypatch):
+    """A service call tagged with delay_after pauses before the next call fires."""
+    import custom_components.chime_tts as integration
+
+    fired = []
+    slept = []
+
+    class _Services:
+        async def async_call(self, domain, service, service_data=None):
+            fired.append((domain, service))
+
+    class _Hass:
+        services = _Services()
+
+    async def _fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(integration.asyncio, "sleep", _fake_sleep)
+
+    calls = [
+        {
+            "domain": "media_player",
+            "service": "volume_set",
+            "service_data": {"entity_id": "media_player.kitchen"},
+            "delay_after": 200,
+        },
+        {
+            "domain": "media_player",
+            "service": "play_media",
+            "service_data": {"entity_id": "media_player.kitchen"},
+        },
+    ]
+
+    result = await integration.async_fire_media_service_calls(_Hass(), calls)
+    assert result is True
+    assert fired == [("media_player", "volume_set"), ("media_player", "play_media")]
+    # Only the tagged call sleeps, and for the requested 200ms.
+    assert slept == [0.2]
+
+
+async def test_sonos_public_url_published_from_processed_local_file(monkeypatch):
+    """Sonos plays a www copy of the PROCESSED local file, not the Alexa public copy (#88714)."""
+    import custom_components.chime_tts as integration
+    from custom_components.chime_tts.const import (
+        LOCAL_PATH_KEY,
+        PUBLIC_PATH_KEY,
+        SONOS_PUBLIC_URL_KEY,
+        WWW_PATH_KEY,
+    )
+
+    copied = []
+
+    async def _copy(hass, src, dst):
+        copied.append((src, dst))
+        return "/config/www/chime_tts/processed.mp3"
+
+    async def _external(hass, file_path):
+        return "http://ha.local/local/chime_tts/processed.mp3"
+
+    monkeypatch.setattr(integration.filesystem_helper, "async_copy_file", _copy)
+    monkeypatch.setattr(
+        integration.filesystem_helper, "async_get_external_url", _external
+    )
+    monkeypatch.setitem(integration._data, WWW_PATH_KEY, "/config/www/chime_tts")
+
+    # Mixed Sonos + Alexa: PUBLIC_PATH_KEY holds the pre-processed Alexa copy.
+    audio_dict = {
+        LOCAL_PATH_KEY: "/media/sounds/temp/chime_tts/processed.mp3",
+        PUBLIC_PATH_KEY: "http://ha.local/local/chime_tts/alexa_unprocessed.mp3",
+    }
+    result = await integration.async_ensure_sonos_public_url(None, audio_dict)
+
+    # Copied from the processed local file, not the Alexa public copy.
+    assert copied == [
+        ("/media/sounds/temp/chime_tts/processed.mp3", "/config/www/chime_tts")
+    ]
+    assert (
+        result[SONOS_PUBLIC_URL_KEY] == "http://ha.local/local/chime_tts/processed.mp3"
+    )
+    # The Alexa public copy is left untouched.
+    assert (
+        result[PUBLIC_PATH_KEY]
+        == "http://ha.local/local/chime_tts/alexa_unprocessed.mp3"
+    )
+
+
+async def test_sonos_public_url_reused_when_already_resolved(monkeypatch):
+    """A persisted Sonos URL is reused on a cache hit without re-copying (#88714)."""
+    import custom_components.chime_tts as integration
+    from custom_components.chime_tts.const import LOCAL_PATH_KEY, SONOS_PUBLIC_URL_KEY
+
+    copied = []
+
+    async def _copy(hass, src, dst):
+        copied.append((src, dst))
+        return "should-not-be-called"
+
+    monkeypatch.setattr(integration.filesystem_helper, "async_copy_file", _copy)
+
+    audio_dict = {
+        LOCAL_PATH_KEY: "/media/sounds/temp/chime_tts/processed.mp3",
+        SONOS_PUBLIC_URL_KEY: "http://ha.local/local/chime_tts/processed.mp3",
+    }
+    result = await integration.async_ensure_sonos_public_url(None, audio_dict)
+    assert (
+        result[SONOS_PUBLIC_URL_KEY] == "http://ha.local/local/chime_tts/processed.mp3"
+    )
+    assert copied == []  # already resolved, no re-copy
+
+
+async def test_clear_cache_removes_sonos_public_copy(monkeypatch):
+    """clear_cache deletes the tracked Sonos www copy (#88714)."""
+    import custom_components.chime_tts as integration
+    from custom_components.chime_tts.const import SONOS_PUBLIC_URL_KEY
+
+    deleted = []
+
+    async def _retrieve(hass, key):
+        return {SONOS_PUBLIC_URL_KEY: "http://ha.local/local/chime_tts/processed.mp3"}
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(integration, "async_retrieve_data", _retrieve)
+    monkeypatch.setattr(integration, "async_delete_data", _noop)
+    monkeypatch.setattr(
+        integration.filesystem_helper,
+        "async_file_exists_in_directory",
+        _noop,
+    )
+    monkeypatch.setattr(
+        integration.filesystem_helper,
+        "delete_file",
+        lambda hass, path: deleted.append(path),
+    )
+
+    await integration.async_remove_cached_audio_data(
+        None, "hash", clear_www_tts_cache=True
+    )
+    assert "http://ha.local/local/chime_tts/processed.mp3" in deleted
+
+
+async def test_cast_delay_accepts_templated_float_string():
+    """A templated cast_delay like "2000.0" parses without raising (Gemini review)."""
+    from custom_components.chime_tts.helpers.helpers import ChimeTTSHelper
+
+    helper = ChimeTTSHelper()
+
+    class _MediaPlayerHelper:
+        def parse_entity_ids(self, data, hass):
+            return ["media_player.cast_kitchen"]
+
+        async def async_initialize_media_players(self, *args, **kwargs):
+            return [object()]
+
+        def get_media_players_of_platform(self, entity_ids, platform):
+            return []
+
+    params = await helper.async_parse_params(
+        None, {"message": "hi", "cast_delay": "2000.0"}, False, _MediaPlayerHelper()
+    )
+    assert params["cast_delay"] == 2000
+
+    # Garbage values fall back to 0 rather than raising.
+    params = await helper.async_parse_params(
+        None, {"message": "hi", "cast_delay": "abc"}, False, _MediaPlayerHelper()
+    )
+    assert params["cast_delay"] == 0
+
+
+def test_cast_delay_padding_applied_once_with_repeat():
+    """Cast startup silence pads only the receiver startup, not every repeat (Codex review)."""
+    from pydub import AudioSegment
+
+    from custom_components.chime_tts import _apply_repeat_and_cast_delay
+
+    content = AudioSegment.silent(duration=1000)  # 1s assembled audio
+    result = _apply_repeat_and_cast_delay(content, repeat=3, cast_delay=2000)
+
+    # 2s pad once + 3 x 1s content, not 3 x (2s + 1s).
+    assert len(result) == 2000 + 3 * 1000
+
+    # Repeat only, no Cast pad.
+    assert len(_apply_repeat_and_cast_delay(content, repeat=3, cast_delay=0)) == 3000
+    # Cast pad only, no repeat.
+    assert len(_apply_repeat_and_cast_delay(content, repeat=1, cast_delay=2000)) == 3000
+    # Neither: segment unchanged.
+    assert len(_apply_repeat_and_cast_delay(content, repeat=1, cast_delay=0)) == 1000

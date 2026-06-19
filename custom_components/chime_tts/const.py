@@ -42,9 +42,26 @@ TRANSITION_STEP_MS = 150
 ADD_COVER_ART_KEY = "add_cover_art"
 
 ALEXA_MEDIA_PLAYER_PLATFORM = "alexa_media"
+CAST_PLATFORM = "cast"
 SONOS_PLATFORM = "sonos"
 SPOTIFY_PLATFORM = "spotify"
 SQUEEZEBOX_PLATFORM = "squeezebox"
+
+# Google Cast receivers drop the first second or two of audio while the
+# default media receiver app spins up a new playback context, so a short
+# chime or the start of TTS gets clipped. Prepend this much leading silence
+# when Cast players are targeted; overridable per call via the `cast_delay`
+# field (set to 0 to disable).
+DEFAULT_CAST_DELAY_MS = 2000
+
+# Some Sonos models drop the play_media request when it arrives in the same
+# instant as the preceding volume_set. Wait this long after the volume_set
+# before issuing play_media so the speaker settles.
+SONOS_VOLUME_SETTLE_MS = 200
+
+# audio_dict key holding the unauthenticated www URL Sonos plays instead of the
+# signed media-source URL (home-assistant/core#88714).
+SONOS_PUBLIC_URL_KEY = "sonos_public_url"
 
 ROOT_PATH_KEY = "root_path_key"
 MEDIA_FOLDER_PATH = "/local/"

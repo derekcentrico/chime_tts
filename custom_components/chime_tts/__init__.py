@@ -1,5 +1,6 @@
 """The Chime TTS integration."""
 
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -67,6 +68,8 @@ from .const import (
     ALEXA_MEDIA_PLAYER_PLATFORM,
     FFMPEG_ARGS_ALEXA,
     SONOS_PLATFORM,
+    SONOS_PUBLIC_URL_KEY,
+    SONOS_VOLUME_SETTLE_MS,
     SQUEEZEBOX_PLATFORM,
     MP3_PRESET_CUSTOM_PREFIX,
     MP3_PRESET_CUSTOM_KEY,
@@ -297,12 +300,14 @@ async def async_prepare_media(hass: HomeAssistant, params, options, media_player
     # Create audio file to play on media player
     local_path = None
     public_path = None
+    sonos_public_path = None
     media_content_id = None
     audio_duration = 0
     audio_dict = await async_get_playback_audio_path(params, options)
     if audio_dict is not None:
         local_path = audio_dict.get(LOCAL_PATH_KEY, None)
         public_path = audio_dict.get(PUBLIC_PATH_KEY, None)
+        sonos_public_path = audio_dict.get(SONOS_PUBLIC_URL_KEY, None)
         media_content_id = audio_dict.get(ATTR_MEDIA_CONTENT_ID, None)
         audio_duration = audio_dict.get(AUDIO_DURATION_KEY, 0)
 
@@ -339,6 +344,10 @@ async def async_prepare_media(hass: HomeAssistant, params, options, media_player
                     _LOGGER.debug("Removing temporary file%s:", "s" if local_path and public_path else "")
                 filesystem_helper.delete_file(hass, local_path)
                 filesystem_helper.delete_file(hass, public_path)
+                # The Sonos www copy is tracked separately (it is distinct from a
+                # public Alexa copy), so remove it too rather than leak it.
+                if sonos_public_path and sonos_public_path != public_path:
+                    filesystem_helper.delete_file(hass, sonos_public_path)
 
 
     end_time = datetime.now()
@@ -532,6 +541,54 @@ async def async_update_configuration(config_entry: ConfigEntry, hass: HomeAssist
 ### Audio Helper Functions ###
 ##############################
 
+def _apply_repeat_and_cast_delay(segment: AudioSegment, repeat: int, cast_delay):
+    """Repeat the assembled audio, then prepend Cast startup silence once.
+
+    The Cast leading silence pads the receiver's media-context startup, so it is
+    added after the repeat rather than baked into the repeated unit; otherwise a
+    repeated Cast announcement would carry the pad before every repeat.
+    """
+    if isinstance(repeat, int) and repeat > 1:
+        segment = segment * repeat
+    if isinstance(cast_delay, (int, float)) and cast_delay > 0:
+        segment = AudioSegment.silent(duration=cast_delay) + segment
+    return segment
+
+
+async def async_ensure_sonos_public_url(hass: HomeAssistant, audio_dict: dict):
+    """Ensure a Sonos-playable unauthenticated public URL is set on audio_dict.
+
+    Sonos plays the /local/ www URL instead of the signed media-source URL,
+    whose 1-day token expires and gets the Sonos IP banned on re-fetch
+    (home-assistant/core#88714).
+
+    The www copy is always made from the PROCESSED local file (repeat and audio
+    conversion applied), never from PUBLIC_PATH_KEY. When a public-only target
+    such as Alexa is also present, PUBLIC_PATH_KEY holds an Alexa copy saved from
+    the pre-processed audio, so reusing it would play unprocessed audio on Sonos.
+    The copy is keyed off the source filename, so re-copying a cached file is
+    idempotent. Safe to call on the cached-audio path. Falls back to the
+    media-source id when no public URL can be produced.
+    """
+    if audio_dict.get(SONOS_PUBLIC_URL_KEY):
+        return audio_dict
+
+    local_path = audio_dict.get(LOCAL_PATH_KEY)
+    if not local_path:
+        # No processed local file (public-only path): reuse the public copy.
+        if audio_dict.get(PUBLIC_PATH_KEY):
+            audio_dict[SONOS_PUBLIC_URL_KEY] = audio_dict[PUBLIC_PATH_KEY]
+        return audio_dict
+
+    try:
+        sonos_public_file = await filesystem_helper.async_copy_file(hass, local_path, _data[WWW_PATH_KEY])
+        if sonos_public_file:
+            audio_dict[SONOS_PUBLIC_URL_KEY] = await filesystem_helper.async_get_external_url(hass, sonos_public_file)
+    except Exception as error:
+        _LOGGER.debug("Could not create a public Sonos URL; using media-source: %s", error)
+
+    return audio_dict
+
 async def async_get_playback_audio_path(params: dict, options: dict):
     """Create audio to play on media player entity."""
     output_audio = None
@@ -548,6 +605,7 @@ async def async_get_playback_audio_path(params: dict, options: dict):
 
     # Produce local and/or public mp3s?
     alexa_media_player_count = public_count = media_player_helper.get_alexa_media_players_count()
+    has_sonos = len(media_player_helper.get_media_players_of_platform(entity_ids, SONOS_PLATFORM)) > 0
     is_public = public_count > 0 or (entity_ids is None or len(entity_ids) == 0)
     is_local = entity_ids is not None and len(entity_ids) > 0 and public_count != len(entity_ids)
 
@@ -559,6 +617,16 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         _LOGGER.debug(" *** Checking Chime TTS audio cache ***")
         audio_dict: dict = await async_verify_cached_audio(hass, filepath_hash, params, options, is_local, is_public, ffmpeg_args)
         if audio_dict:
+            # Cached entries store only paths/duration, so a Sonos public URL is
+            # resolved here too; otherwise cached Sonos playback falls back to the
+            # signed media-source id and hits the same auth expiry (#88714). The
+            # resolved URL is written back so clear_cache can remove the www copy
+            # and later hits reuse it instead of re-copying.
+            if has_sonos:
+                had_public_url = bool(audio_dict.get(SONOS_PUBLIC_URL_KEY))
+                audio_dict = await async_ensure_sonos_public_url(hass, audio_dict)
+                if audio_dict.get(SONOS_PUBLIC_URL_KEY) and not had_public_url:
+                    await async_store_data(hass, filepath_hash, audio_dict)
             return audio_dict
         _LOGGER.debug("   ...no cached audio found")
 
@@ -639,12 +707,14 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         except Exception as e:
             raise RuntimeError(f"An unexpected error occurred: {e}")
 
-        # Repeat the whole assembled chime + message audio (#314). Done at the
-        # audio level so the chimes repeat too, not just the message segments.
+        # Repeat the whole assembled chime + message audio (#314), then prepend
+        # any Cast startup silence. Re-exported only when the segment changed.
         repeat = params.get("repeat", 1)
         repeat = max(repeat, 1) if isinstance(repeat, int) else 1
-        if repeat > 1:
-            new_audio_segment = new_audio_segment * repeat
+        cast_delay = params.get("cast_delay", 0)
+        final_segment = _apply_repeat_and_cast_delay(new_audio_segment, repeat, cast_delay)
+        if len(final_segment) != len(new_audio_segment):
+            new_audio_segment = final_segment
             await filesystem_helper.async_export_audio(new_audio_segment, new_audio_file)
 
         duration = len(new_audio_segment) / 1000.0
@@ -664,6 +734,11 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         if is_local:
             audio_dict[ATTR_MEDIA_CONTENT_ID] = media_player_helper.get_media_content_id(hass, audio_dict.get(LOCAL_PATH_KEY, ''))
 
+        # For Sonos, ensure an unauthenticated public URL exists so the speaker
+        # never re-fetches an expired signed media-source URL (#88714).
+        if has_sonos:
+            audio_dict = await async_ensure_sonos_public_url(hass, audio_dict)
+
     # Valdiation
     is_valid = await hass.async_add_executor_job(validate_audio_dict, hass, is_local, is_public, audio_dict)
     if not is_valid:
@@ -679,6 +754,10 @@ async def async_get_playback_audio_path(params: dict, options: dict):
     if cache:
         await async_add_audio_file_to_cache(hass, audio_dict.get(PUBLIC_PATH_KEY, None), duration, params, options)
         await async_add_audio_file_to_cache(hass, audio_dict.get(LOCAL_PATH_KEY, None), duration, params, options)
+        # Persist the Sonos www URL alongside the cached paths so clear_cache can
+        # remove the copy and later cache hits reuse it (#88714).
+        if has_sonos and audio_dict.get(SONOS_PUBLIC_URL_KEY):
+            await async_store_data(hass, filepath_hash, audio_dict)
 
     return audio_dict
 
@@ -1104,6 +1183,16 @@ async def async_play_media(
 
     return play_result
 
+def _sonos_content_id(public_url, media_source_id):
+    """Pick the Sonos media content id, preferring an unauthenticated public URL.
+
+    Sonos re-fetches the last-played URL; a signed `media-source://` URL carries a
+    1-day token, so the later re-fetch fails auth and HA bans the Sonos IP
+    (home-assistant/core#88714). A public `/local/` URL needs no auth, so its
+    re-fetch is harmless. Falls back to the media-source id when no public URL.
+    """
+    return public_url or media_source_id
+
 def _sonos_volume_set_call(entity_id, volume_percent: int):
     """Build an explicit volume_set call for Sonos before an announcement.
 
@@ -1120,6 +1209,9 @@ def _sonos_volume_set_call(entity_id, volume_percent: int):
         },
         "blocking": True,
         "result": True,
+        # Let the speaker apply the new level before the announcement arrives;
+        # some Sonos models drop a play_media issued in the same instant.
+        "delay_after": SONOS_VOLUME_SETTLE_MS,
     }
 
 async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, service_data, audio_dict):  # noqa: C901
@@ -1181,7 +1273,12 @@ async def async_prepare_media_service_calls(hass: HomeAssistant, entity_ids, ser
     # Sonos media_players
     if len(sonos_media_player_entity_ids) > 0:
         sonos_service_data = service_data.copy()
-        if sonos_service_data[ATTR_MEDIA_CONTENT_ID] is None:
+        # Prefer an unauthenticated public URL for Sonos. The signed media-source
+        # URL carries a 1-day token that Sonos re-fetches after it expires, which
+        # triggers HA "invalid authentication" bans (home-assistant/core#88714).
+        sonos_content_id = _sonos_content_id(audio_dict.get(SONOS_PUBLIC_URL_KEY, None), sonos_service_data[ATTR_MEDIA_CONTENT_ID])
+        sonos_service_data[ATTR_MEDIA_CONTENT_ID] = sonos_content_id
+        if sonos_content_id is None:
             _LOGGER.warning("Error calling `media_player.play_media` service: No media content id found")
         else:
             _LOGGER.debug(
@@ -1322,6 +1419,11 @@ async def async_fire_media_service_calls(hass: HomeAssistant, media_service_call
                 service=service_call["service"],
                 service_data=service_call["service_data"]
             )
+            # Optional settle delay before the next call (e.g. Sonos volume_set
+            # ahead of play_media).
+            delay_after = service_call.get("delay_after", 0)
+            if isinstance(delay_after, (int, float)) and delay_after > 0:
+                await asyncio.sleep(delay_after / 1000)
         except ServiceNotFound:
             _LOGGER.error("Could not find service `%s.%s`.%s",
                     service_call["domain"],
@@ -1518,6 +1620,10 @@ async def async_remove_cached_audio_data(hass: HomeAssistant,
             _LOGGER.debug("...removing public file %s", value)
             filesystem_helper.delete_file(hass, audio_dict.get(PUBLIC_PATH_KEY, None))
             audio_dict[PUBLIC_PATH_KEY] = None
+        elif key == SONOS_PUBLIC_URL_KEY and value is not None and clear_www_tts_cache:
+            _LOGGER.debug("...removing Sonos public file %s", value)
+            filesystem_helper.delete_file(hass, value)
+            audio_dict[SONOS_PUBLIC_URL_KEY] = None
 
     # Remove key/value from integration storage if no paths remain
     if audio_dict.get(LOCAL_PATH_KEY, None) is not None or (audio_dict.get(PUBLIC_PATH_KEY, None)):
@@ -1575,6 +1681,9 @@ def get_filename_hash_from_service_data(params: dict, options: dict):
         "tts_speed",
         "tts_pitch",
         "repeat",
+        # Cast leading silence is baked into the file, so a cached non-Cast file
+        # must not be reused for a Cast target (and vice versa).
+        "cast_delay",
     ]
     for param in relevant_params:
         for dictionary in [params, options]:

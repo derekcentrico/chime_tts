@@ -192,6 +192,18 @@ say:
           min: 1
           mode: box
           step: 1
+    cast_delay:
+      description: Leading silence (in milliseconds) added for Google Cast speakers, which clip the start of playback while the receiver starts. Defaults to 2000 when a Cast speaker is targeted; set to 0 to disable.
+      example: 2000
+      name: Cast Delay
+      required: false
+      selector:
+        number:
+          max: 10000
+          min: 0
+          mode: box
+          step: 100
+          unit_of_measurement: ms
     pre_script:
       description: A script entity to run before the audio plays (e.g. script.front_door)
       example: script.front_door
