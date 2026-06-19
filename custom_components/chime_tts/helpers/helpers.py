@@ -18,6 +18,8 @@ from ..const import (
     DEFAULT_VOICE_KEY,
     DEFAULT_TLD_KEY,
     DEFAULT_OFFSET_MS,
+    CAST_PLATFORM,
+    DEFAULT_CAST_DELAY_MS,
     FFMPEG_ARGS_ALEXA,
     FFMPEG_ARGS_VOLUME,
     AMAZON_POLLY,
@@ -93,6 +95,16 @@ class ChimeTTSHelper:
         if len(media_players_array) == 0 and is_say_url is False:
             return None
 
+        # Leading silence for Google Cast targets. Honour an explicit `cast_delay`
+        # (including 0 to disable), otherwise apply the default only when a Cast
+        # player is among the targets so non-Cast playback is unaffected.
+        if "cast_delay" in data and data.get("cast_delay") is not None:
+            cast_delay = max(int(data.get("cast_delay") or 0), 0)
+        elif media_player_helper.get_media_players_of_platform(entity_ids, CAST_PLATFORM):
+            cast_delay = DEFAULT_CAST_DELAY_MS
+        else:
+            cast_delay = 0
+
         # FFmpeg arguments
         ffmpeg_args: str = self.parse_ffmpeg_args(data.get("audio_conversion", None))
 
@@ -111,6 +123,7 @@ class ChimeTTSHelper:
             "tts_speed": tts_speed,
             "tts_pitch": tts_pitch,
             "repeat": repeat,
+            "cast_delay": cast_delay,
             "pre_script": pre_script,
             "post_script": post_script,
             "announce": announce,

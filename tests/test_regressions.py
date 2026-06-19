@@ -398,3 +398,66 @@ def test_issue_88714_sonos_prefers_public_url():
         == "media-source://media_source/media/chime.mp3"
     )
     assert _sonos_content_id(None, None) is None
+
+
+def test_sonos_volume_set_carries_settle_delay():
+    """The Sonos volume_set call requests a settle delay before play_media."""
+    from custom_components.chime_tts import _sonos_volume_set_call
+    from custom_components.chime_tts.const import SONOS_VOLUME_SETTLE_MS
+
+    call = _sonos_volume_set_call("media_player.kitchen", 50)
+    assert call["delay_after"] == SONOS_VOLUME_SETTLE_MS
+    assert SONOS_VOLUME_SETTLE_MS > 0
+
+
+def test_cast_delay_is_part_of_cache_key():
+    """A baked-in Cast leading silence makes the cached file unique per delay."""
+    from custom_components.chime_tts import get_filename_hash_from_service_data
+
+    base = {"message": "hi"}
+    assert get_filename_hash_from_service_data(
+        base, {}
+    ) != get_filename_hash_from_service_data({**base, "cast_delay": 2000}, {})
+    assert get_filename_hash_from_service_data(
+        {**base, "cast_delay": 1000}, {}
+    ) != get_filename_hash_from_service_data({**base, "cast_delay": 2000}, {})
+
+
+async def test_fire_media_service_calls_honors_delay_after(monkeypatch):
+    """A service call tagged with delay_after pauses before the next call fires."""
+    import custom_components.chime_tts as integration
+
+    fired = []
+    slept = []
+
+    class _Services:
+        async def async_call(self, domain, service, service_data=None):
+            fired.append((domain, service))
+
+    class _Hass:
+        services = _Services()
+
+    async def _fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(integration.asyncio, "sleep", _fake_sleep)
+
+    calls = [
+        {
+            "domain": "media_player",
+            "service": "volume_set",
+            "service_data": {"entity_id": "media_player.kitchen"},
+            "delay_after": 200,
+        },
+        {
+            "domain": "media_player",
+            "service": "play_media",
+            "service_data": {"entity_id": "media_player.kitchen"},
+        },
+    ]
+
+    result = await integration.async_fire_media_service_calls(_Hass(), calls)
+    assert result is True
+    assert fired == [("media_player", "volume_set"), ("media_player", "play_media")]
+    # Only the tagged call sleeps, and for the requested 200ms.
+    assert slept == [0.2]
