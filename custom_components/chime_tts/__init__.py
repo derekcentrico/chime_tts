@@ -541,6 +541,20 @@ async def async_update_configuration(config_entry: ConfigEntry, hass: HomeAssist
 ### Audio Helper Functions ###
 ##############################
 
+def _apply_repeat_and_cast_delay(segment: AudioSegment, repeat: int, cast_delay):
+    """Repeat the assembled audio, then prepend Cast startup silence once.
+
+    The Cast leading silence pads the receiver's media-context startup, so it is
+    added after the repeat rather than baked into the repeated unit; otherwise a
+    repeated Cast announcement would carry the pad before every repeat.
+    """
+    if isinstance(repeat, int) and repeat > 1:
+        segment = segment * repeat
+    if isinstance(cast_delay, (int, float)) and cast_delay > 0:
+        segment = AudioSegment.silent(duration=cast_delay) + segment
+    return segment
+
+
 async def async_ensure_sonos_public_url(hass: HomeAssistant, audio_dict: dict):
     """Ensure a Sonos-playable unauthenticated public URL is set on audio_dict.
 
@@ -640,15 +654,6 @@ async def async_get_playback_audio_path(params: dict, options: dict):
                                                    crossfade=crossfade,
                                                    audio=output_audio)
 
-    # Prepend leading silence for Google Cast targets, which clip the start of
-    # playback while the receiver app starts a new media context (#88714-class
-    # "first chime missing" reports). Resolved in async_parse_params and folded
-    # into the cache key so Cast and non-Cast files stay distinct.
-    cast_delay = params.get("cast_delay", 0)
-    if output_audio is not None and isinstance(cast_delay, int) and cast_delay > 0:
-        _LOGGER.debug(" - Prepending %sms of leading silence for Cast playback", cast_delay)
-        output_audio = AudioSegment.silent(duration=cast_delay) + output_audio
-
     # Save generated audio file
     audio_dict = {
         AUDIO_DURATION_KEY: 0,
@@ -702,12 +707,14 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         except Exception as e:
             raise RuntimeError(f"An unexpected error occurred: {e}")
 
-        # Repeat the whole assembled chime + message audio (#314). Done at the
-        # audio level so the chimes repeat too, not just the message segments.
+        # Repeat the whole assembled chime + message audio (#314), then prepend
+        # any Cast startup silence. Re-exported only when the segment changed.
         repeat = params.get("repeat", 1)
         repeat = max(repeat, 1) if isinstance(repeat, int) else 1
-        if repeat > 1:
-            new_audio_segment = new_audio_segment * repeat
+        cast_delay = params.get("cast_delay", 0)
+        final_segment = _apply_repeat_and_cast_delay(new_audio_segment, repeat, cast_delay)
+        if len(final_segment) != len(new_audio_segment):
+            new_audio_segment = final_segment
             await filesystem_helper.async_export_audio(new_audio_segment, new_audio_file)
 
         duration = len(new_audio_segment) / 1000.0
@@ -1415,7 +1422,7 @@ async def async_fire_media_service_calls(hass: HomeAssistant, media_service_call
             # Optional settle delay before the next call (e.g. Sonos volume_set
             # ahead of play_media).
             delay_after = service_call.get("delay_after", 0)
-            if isinstance(delay_after, int) and delay_after > 0:
+            if isinstance(delay_after, (int, float)) and delay_after > 0:
                 await asyncio.sleep(delay_after / 1000)
         except ServiceNotFound:
             _LOGGER.error("Could not find service `%s.%s`.%s",

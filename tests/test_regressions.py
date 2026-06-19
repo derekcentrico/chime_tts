@@ -591,3 +591,23 @@ async def test_cast_delay_accepts_templated_float_string():
         None, {"message": "hi", "cast_delay": "abc"}, False, _MediaPlayerHelper()
     )
     assert params["cast_delay"] == 0
+
+
+def test_cast_delay_padding_applied_once_with_repeat():
+    """Cast startup silence pads only the receiver startup, not every repeat (Codex review)."""
+    from pydub import AudioSegment
+
+    from custom_components.chime_tts import _apply_repeat_and_cast_delay
+
+    content = AudioSegment.silent(duration=1000)  # 1s assembled audio
+    result = _apply_repeat_and_cast_delay(content, repeat=3, cast_delay=2000)
+
+    # 2s pad once + 3 x 1s content, not 3 x (2s + 1s).
+    assert len(result) == 2000 + 3 * 1000
+
+    # Repeat only, no Cast pad.
+    assert len(_apply_repeat_and_cast_delay(content, repeat=3, cast_delay=0)) == 3000
+    # Cast pad only, no repeat.
+    assert len(_apply_repeat_and_cast_delay(content, repeat=1, cast_delay=2000)) == 3000
+    # Neither: segment unchanged.
+    assert len(_apply_repeat_and_cast_delay(content, repeat=1, cast_delay=0)) == 1000
