@@ -461,3 +461,81 @@ async def test_fire_media_service_calls_honors_delay_after(monkeypatch):
     assert fired == [("media_player", "volume_set"), ("media_player", "play_media")]
     # Only the tagged call sleeps, and for the requested 200ms.
     assert slept == [0.2]
+
+
+async def test_sonos_public_url_reuses_existing_public_path(monkeypatch):
+    """An existing public path is reused for Sonos without a duplicate copy (#88714)."""
+    import custom_components.chime_tts as integration
+    from custom_components.chime_tts.const import PUBLIC_PATH_KEY
+
+    copied = []
+
+    async def _no_copy(hass, src, dst):
+        copied.append((src, dst))
+        return "should-not-be-called"
+
+    monkeypatch.setattr(integration.filesystem_helper, "async_copy_file", _no_copy)
+
+    audio_dict = {PUBLIC_PATH_KEY: "http://ha.local/local/chime.mp3"}
+    result = await integration.async_ensure_sonos_public_url(None, audio_dict)
+    assert result["sonos_public_url"] == "http://ha.local/local/chime.mp3"
+    assert copied == []  # no redundant copy
+
+
+async def test_sonos_public_url_copies_and_tracks_for_cleanup(monkeypatch):
+    """A Sonos-only file is copied to www and tracked under PUBLIC_PATH_KEY so it is cleaned up (#88714)."""
+    import custom_components.chime_tts as integration
+    from custom_components.chime_tts.const import (
+        LOCAL_PATH_KEY,
+        PUBLIC_PATH_KEY,
+        WWW_PATH_KEY,
+    )
+
+    async def _copy(hass, src, dst):
+        return "/config/www/chime_tts/abc.mp3"
+
+    async def _external(hass, file_path):
+        return "http://ha.local/local/chime_tts/abc.mp3"
+
+    monkeypatch.setattr(integration.filesystem_helper, "async_copy_file", _copy)
+    monkeypatch.setattr(
+        integration.filesystem_helper, "async_get_external_url", _external
+    )
+    monkeypatch.setitem(integration._data, WWW_PATH_KEY, "/config/www/chime_tts")
+
+    audio_dict = {
+        LOCAL_PATH_KEY: "/media/sounds/temp/chime_tts/abc.mp3",
+        PUBLIC_PATH_KEY: None,
+    }
+    result = await integration.async_ensure_sonos_public_url(None, audio_dict)
+    assert result["sonos_public_url"] == "http://ha.local/local/chime_tts/abc.mp3"
+    # Tracked under PUBLIC_PATH_KEY so the uncached cleanup deletes the www copy.
+    assert result[PUBLIC_PATH_KEY] == "http://ha.local/local/chime_tts/abc.mp3"
+
+
+async def test_cast_delay_accepts_templated_float_string():
+    """A templated cast_delay like "2000.0" parses without raising (Gemini review)."""
+    from custom_components.chime_tts.helpers.helpers import ChimeTTSHelper
+
+    helper = ChimeTTSHelper()
+
+    class _MediaPlayerHelper:
+        def parse_entity_ids(self, data, hass):
+            return ["media_player.cast_kitchen"]
+
+        async def async_initialize_media_players(self, *args, **kwargs):
+            return [object()]
+
+        def get_media_players_of_platform(self, entity_ids, platform):
+            return []
+
+    params = await helper.async_parse_params(
+        None, {"message": "hi", "cast_delay": "2000.0"}, False, _MediaPlayerHelper()
+    )
+    assert params["cast_delay"] == 2000
+
+    # Garbage values fall back to 0 rather than raising.
+    params = await helper.async_parse_params(
+        None, {"message": "hi", "cast_delay": "abc"}, False, _MediaPlayerHelper()
+    )
+    assert params["cast_delay"] == 0

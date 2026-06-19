@@ -534,6 +534,42 @@ async def async_update_configuration(config_entry: ConfigEntry, hass: HomeAssist
 ### Audio Helper Functions ###
 ##############################
 
+async def async_ensure_sonos_public_url(hass: HomeAssistant, audio_dict: dict):
+    """Ensure a Sonos-playable unauthenticated public URL is set on audio_dict.
+
+    Sonos plays the /local/ www URL instead of the signed media-source URL,
+    whose 1-day token expires and gets the Sonos IP banned on re-fetch
+    (home-assistant/core#88714). Reuses an existing public path when one is
+    present to avoid a duplicate copy; otherwise copies the processed local
+    file into www and records it under PUBLIC_PATH_KEY so the uncached cleanup
+    deletes it. Falls back to the media-source id when no public URL can be
+    produced. Safe to call on the cached-audio path too.
+    """
+    if audio_dict.get("sonos_public_url"):
+        return audio_dict
+
+    # Already saved to www (e.g. an Alexa target was present): reuse it.
+    if audio_dict.get(PUBLIC_PATH_KEY):
+        audio_dict["sonos_public_url"] = audio_dict[PUBLIC_PATH_KEY]
+        return audio_dict
+
+    local_path = audio_dict.get(LOCAL_PATH_KEY)
+    if not local_path:
+        return audio_dict
+
+    try:
+        sonos_public_file = await filesystem_helper.async_copy_file(hass, local_path, _data[WWW_PATH_KEY])
+        if sonos_public_file:
+            public_url = await filesystem_helper.async_get_external_url(hass, sonos_public_file)
+            audio_dict["sonos_public_url"] = public_url
+            # Track under PUBLIC_PATH_KEY so the uncached cleanup removes the
+            # www copy after playback rather than leaking it.
+            audio_dict[PUBLIC_PATH_KEY] = public_url
+    except Exception as error:
+        _LOGGER.debug("Could not create a public Sonos URL; using media-source: %s", error)
+
+    return audio_dict
+
 async def async_get_playback_audio_path(params: dict, options: dict):
     """Create audio to play on media player entity."""
     output_audio = None
@@ -562,6 +598,11 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         _LOGGER.debug(" *** Checking Chime TTS audio cache ***")
         audio_dict: dict = await async_verify_cached_audio(hass, filepath_hash, params, options, is_local, is_public, ffmpeg_args)
         if audio_dict:
+            # Cached entries store only paths/duration, so a Sonos public URL is
+            # resolved here too; otherwise cached Sonos playback falls back to the
+            # signed media-source id and hits the same auth expiry (#88714).
+            if has_sonos:
+                audio_dict = await async_ensure_sonos_public_url(hass, audio_dict)
             return audio_dict
         _LOGGER.debug("   ...no cached audio found")
 
@@ -676,18 +717,10 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         if is_local:
             audio_dict[ATTR_MEDIA_CONTENT_ID] = media_player_helper.get_media_content_id(hass, audio_dict.get(LOCAL_PATH_KEY, ''))
 
-        # For Sonos, copy the PROCESSED file into the public www folder and store
-        # its unauthenticated external URL. Sonos plays that instead of the signed
-        # media-source URL, whose 1-day token expires and gets the Sonos IP banned
-        # when Sonos re-fetches it (home-assistant/core#88714). Falls back to the
-        # media-source id when no public URL can be produced.
-        if has_sonos and audio_dict.get(LOCAL_PATH_KEY):
-            try:
-                sonos_public_file = await filesystem_helper.async_copy_file(hass, audio_dict[LOCAL_PATH_KEY], _data[WWW_PATH_KEY])
-                if sonos_public_file:
-                    audio_dict["sonos_public_url"] = await filesystem_helper.async_get_external_url(hass, sonos_public_file)
-            except Exception as error:
-                _LOGGER.debug("Could not create a public Sonos URL; using media-source: %s", error)
+        # For Sonos, ensure an unauthenticated public URL exists so the speaker
+        # never re-fetches an expired signed media-source URL (#88714).
+        if has_sonos:
+            audio_dict = await async_ensure_sonos_public_url(hass, audio_dict)
 
     # Valdiation
     is_valid = await hass.async_add_executor_job(validate_audio_dict, hass, is_local, is_public, audio_dict)

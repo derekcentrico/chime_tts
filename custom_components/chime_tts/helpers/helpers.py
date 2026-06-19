@@ -99,7 +99,11 @@ class ChimeTTSHelper:
         # (including 0 to disable), otherwise apply the default only when a Cast
         # player is among the targets so non-Cast playback is unaffected.
         if "cast_delay" in data and data.get("cast_delay") is not None:
-            cast_delay = max(int(data.get("cast_delay") or 0), 0)
+            # Accept templated/float strings like "2000.0" without raising.
+            try:
+                cast_delay = max(int(float(data.get("cast_delay") or 0)), 0)
+            except (ValueError, TypeError):
+                cast_delay = 0
         elif media_player_helper.get_media_players_of_platform(entity_ids, CAST_PLATFORM):
             cast_delay = DEFAULT_CAST_DELAY_MS
         else:
