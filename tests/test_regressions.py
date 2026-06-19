@@ -463,39 +463,24 @@ async def test_fire_media_service_calls_honors_delay_after(monkeypatch):
     assert slept == [0.2]
 
 
-async def test_sonos_public_url_reuses_existing_public_path(monkeypatch):
-    """An existing public path is reused for Sonos without a duplicate copy (#88714)."""
-    import custom_components.chime_tts as integration
-    from custom_components.chime_tts.const import PUBLIC_PATH_KEY
-
-    copied = []
-
-    async def _no_copy(hass, src, dst):
-        copied.append((src, dst))
-        return "should-not-be-called"
-
-    monkeypatch.setattr(integration.filesystem_helper, "async_copy_file", _no_copy)
-
-    audio_dict = {PUBLIC_PATH_KEY: "http://ha.local/local/chime.mp3"}
-    result = await integration.async_ensure_sonos_public_url(None, audio_dict)
-    assert result["sonos_public_url"] == "http://ha.local/local/chime.mp3"
-    assert copied == []  # no redundant copy
-
-
-async def test_sonos_public_url_copies_and_tracks_for_cleanup(monkeypatch):
-    """A Sonos-only file is copied to www and tracked under PUBLIC_PATH_KEY so it is cleaned up (#88714)."""
+async def test_sonos_public_url_published_from_processed_local_file(monkeypatch):
+    """Sonos plays a www copy of the PROCESSED local file, not the Alexa public copy (#88714)."""
     import custom_components.chime_tts as integration
     from custom_components.chime_tts.const import (
         LOCAL_PATH_KEY,
         PUBLIC_PATH_KEY,
+        SONOS_PUBLIC_URL_KEY,
         WWW_PATH_KEY,
     )
 
+    copied = []
+
     async def _copy(hass, src, dst):
-        return "/config/www/chime_tts/abc.mp3"
+        copied.append((src, dst))
+        return "/config/www/chime_tts/processed.mp3"
 
     async def _external(hass, file_path):
-        return "http://ha.local/local/chime_tts/abc.mp3"
+        return "http://ha.local/local/chime_tts/processed.mp3"
 
     monkeypatch.setattr(integration.filesystem_helper, "async_copy_file", _copy)
     monkeypatch.setattr(
@@ -503,14 +488,81 @@ async def test_sonos_public_url_copies_and_tracks_for_cleanup(monkeypatch):
     )
     monkeypatch.setitem(integration._data, WWW_PATH_KEY, "/config/www/chime_tts")
 
+    # Mixed Sonos + Alexa: PUBLIC_PATH_KEY holds the pre-processed Alexa copy.
     audio_dict = {
-        LOCAL_PATH_KEY: "/media/sounds/temp/chime_tts/abc.mp3",
-        PUBLIC_PATH_KEY: None,
+        LOCAL_PATH_KEY: "/media/sounds/temp/chime_tts/processed.mp3",
+        PUBLIC_PATH_KEY: "http://ha.local/local/chime_tts/alexa_unprocessed.mp3",
     }
     result = await integration.async_ensure_sonos_public_url(None, audio_dict)
-    assert result["sonos_public_url"] == "http://ha.local/local/chime_tts/abc.mp3"
-    # Tracked under PUBLIC_PATH_KEY so the uncached cleanup deletes the www copy.
-    assert result[PUBLIC_PATH_KEY] == "http://ha.local/local/chime_tts/abc.mp3"
+
+    # Copied from the processed local file, not the Alexa public copy.
+    assert copied == [
+        ("/media/sounds/temp/chime_tts/processed.mp3", "/config/www/chime_tts")
+    ]
+    assert (
+        result[SONOS_PUBLIC_URL_KEY] == "http://ha.local/local/chime_tts/processed.mp3"
+    )
+    # The Alexa public copy is left untouched.
+    assert (
+        result[PUBLIC_PATH_KEY]
+        == "http://ha.local/local/chime_tts/alexa_unprocessed.mp3"
+    )
+
+
+async def test_sonos_public_url_reused_when_already_resolved(monkeypatch):
+    """A persisted Sonos URL is reused on a cache hit without re-copying (#88714)."""
+    import custom_components.chime_tts as integration
+    from custom_components.chime_tts.const import LOCAL_PATH_KEY, SONOS_PUBLIC_URL_KEY
+
+    copied = []
+
+    async def _copy(hass, src, dst):
+        copied.append((src, dst))
+        return "should-not-be-called"
+
+    monkeypatch.setattr(integration.filesystem_helper, "async_copy_file", _copy)
+
+    audio_dict = {
+        LOCAL_PATH_KEY: "/media/sounds/temp/chime_tts/processed.mp3",
+        SONOS_PUBLIC_URL_KEY: "http://ha.local/local/chime_tts/processed.mp3",
+    }
+    result = await integration.async_ensure_sonos_public_url(None, audio_dict)
+    assert (
+        result[SONOS_PUBLIC_URL_KEY] == "http://ha.local/local/chime_tts/processed.mp3"
+    )
+    assert copied == []  # already resolved, no re-copy
+
+
+async def test_clear_cache_removes_sonos_public_copy(monkeypatch):
+    """clear_cache deletes the tracked Sonos www copy (#88714)."""
+    import custom_components.chime_tts as integration
+    from custom_components.chime_tts.const import SONOS_PUBLIC_URL_KEY
+
+    deleted = []
+
+    async def _retrieve(hass, key):
+        return {SONOS_PUBLIC_URL_KEY: "http://ha.local/local/chime_tts/processed.mp3"}
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(integration, "async_retrieve_data", _retrieve)
+    monkeypatch.setattr(integration, "async_delete_data", _noop)
+    monkeypatch.setattr(
+        integration.filesystem_helper,
+        "async_file_exists_in_directory",
+        _noop,
+    )
+    monkeypatch.setattr(
+        integration.filesystem_helper,
+        "delete_file",
+        lambda hass, path: deleted.append(path),
+    )
+
+    await integration.async_remove_cached_audio_data(
+        None, "hash", clear_www_tts_cache=True
+    )
+    assert "http://ha.local/local/chime_tts/processed.mp3" in deleted
 
 
 async def test_cast_delay_accepts_templated_float_string():

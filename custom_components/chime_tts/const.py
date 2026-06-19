@@ -59,6 +59,10 @@ DEFAULT_CAST_DELAY_MS = 2000
 # before issuing play_media so the speaker settles.
 SONOS_VOLUME_SETTLE_MS = 200
 
+# audio_dict key holding the unauthenticated www URL Sonos plays instead of the
+# signed media-source URL (home-assistant/core#88714).
+SONOS_PUBLIC_URL_KEY = "sonos_public_url"
+
 ROOT_PATH_KEY = "root_path_key"
 MEDIA_FOLDER_PATH = "/local/"
 PUBLIC_FOLDER_PATH = "/config/www/"
