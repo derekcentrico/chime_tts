@@ -1,13 +1,12 @@
-![Chime TTS](https://raw.githubusercontent.com/nimroddolev/chime_tts/main/icon.png)
+![Chime TTS](https://raw.githubusercontent.com/derekcentrico/chime_tts/main/icon.png)
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/integration)
-![version](https://img.shields.io/github/v/release/nimroddolev/chime_tts)
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+![version](https://img.shields.io/github/v/release/derekcentrico/chime_tts)
 [![Community Forum][forum-shield]][forum]
-<a href="https://www.buymeacoffee.com/nimroddolev"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" height="0px"></a>
 
 Chime TTS is a custom Home Assistant integration that eliminates the audio lag between playing a chime/notification sound effect before a TTS audio notification.
 
-#### If you find Chime TTS useful, consider showing your support: <a href="https://www.buymeacoffee.com/nimroddolev" target="_blank"><img src="https://i.ibb.co/D1sqFY8/buy-me-a-coffee.png" alt="Buy Me A Coffee"></a>
+> Maintained fork of [Chime TTS](https://github.com/nimroddolev/chime_tts) by Nimrod Dolev. The original is no longer being updated and broke on recent Home Assistant releases, so this fork carries fixes for TTS platform selection on HA 2025.8+, silent playback, Sonos and Google Cast reliability, and more. See the [releases](https://github.com/derekcentrico/chime_tts/releases) for the full list of changes.
 
 
 - [What is Chime TTS?](https://nimroddolev.github.io/chime_tts/docs/getting-started#what-is-chime-tts)
@@ -24,17 +23,17 @@ Chime TTS is a custom Home Assistant integration that locally combines TTS audio
 
 ### The Problem:
 
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nimroddolev/chime_tts/main/images/wiki/home/no_chime_tts-dark.png">
-<source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/nimroddolev/chime_tts/main/images/wiki/home/no_chime_tts-light.png">
-<img alt="Latency is introduced between the notification chime and the TTS audio" src="https://raw.githubusercontent.com/nimroddolev/chime_tts/main/images/wiki/home/no_chime_tts-dark.png">
+<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/derekcentrico/chime_tts/main/images/wiki/home/no_chime_tts-dark.png">
+<source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/derekcentrico/chime_tts/main/images/wiki/home/no_chime_tts-light.png">
+<img alt="Latency is introduced between the notification chime and the TTS audio" src="https://raw.githubusercontent.com/derekcentrico/chime_tts/main/images/wiki/home/no_chime_tts-dark.png">
 
 Adding a notification chime before Text-To-Speech (TTS) audio messages requires two separate action calls, which introduces lag due to networking latency of cloud TTS platforms, audio processing, and delays before media_player playback begins.
 
 ### The Solution:
 
-<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/nimroddolev/chime_tts/main/images/wiki/home/wuth_chime_tts-dark.png">
-<source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/nimroddolev/chime_tts/main/images/wiki/home/with_chime_tts-light.png">
-<img alt="Chime TTS removes the latency between the notification chime and the TTS audio" src="https://raw.githubusercontent.com/nimroddolev/chime_tts/main/images/wiki/home/with_chime_tts-dark.png">
+<source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/derekcentrico/chime_tts/main/images/wiki/home/wuth_chime_tts-dark.png">
+<source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/derekcentrico/chime_tts/main/images/wiki/home/with_chime_tts-light.png">
+<img alt="Chime TTS removes the latency between the notification chime and the TTS audio" src="https://raw.githubusercontent.com/derekcentrico/chime_tts/main/images/wiki/home/with_chime_tts-dark.png">
 
 **Chime TTS** addresses this issue by combining the audio files into _a single file_ locally on your Home Assistant device. This combined file is then played through your speakers in one seamless event, eliminating any lag.
 
@@ -93,6 +92,10 @@ For configuration, examples and documentation check out [the official Chime TTS 
 ## Support and Discussion
 
 For questions, suggestions, and community discussion about Chime TTS, visit our [Community Forum](https://community.home-assistant.io/t/chime-tts-play-audio-before-after-tts-audio-lag-free/578430).
+
+## Credits
+
+Chime TTS was originally created by [Nimrod Dolev](https://github.com/nimroddolev). This is a community-maintained fork that keeps it working on current Home Assistant releases. The integration remains under the [MIT license](LICENSE).
 
 ***
 
