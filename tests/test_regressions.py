@@ -647,3 +647,36 @@ def test_cloud_legacy_name_not_prefixed_to_nonexistent_entity():
         TTSAudioHelper._resolve_engine_id(hass, "tts.home_assistant_cloud")
         == "tts.home_assistant_cloud"
     )
+
+
+async def test_async_copy_file_offloads_blocking_copy(monkeypatch):
+    """shutil.copy runs in an executor, not on the event loop.
+
+    async_ensure_sonos_public_url copies the www file on every Sonos
+    announcement, so a direct shutil.copy tripped HA's blocking-call detector
+    (#318, #258 class).
+    """
+    import shutil
+
+    from custom_components.chime_tts.helpers.filesystem import FilesystemHelper
+
+    fs = FilesystemHelper()
+    offloaded = []
+
+    def _fake_copy(src, dst):
+        return f"{dst}/copied.mp3"
+
+    # filesystem.py calls shutil.copy, so patching the module attribute is enough.
+    monkeypatch.setattr(shutil, "copy", _fake_copy)
+    # Folder already exists, so async_create_folder skips os.makedirs.
+    monkeypatch.setattr(fs, "path_exists", lambda folder: True)
+
+    class _Hass:
+        async def async_add_executor_job(self, func, *args):
+            offloaded.append(func)
+            return func(*args)
+
+    result = await fs.async_copy_file(_Hass(), "/media/src.mp3", "/config/www")
+    assert result == "/config/www/copied.mp3"
+    # The blocking copy was dispatched through the executor, not called inline.
+    assert _fake_copy in offloaded
