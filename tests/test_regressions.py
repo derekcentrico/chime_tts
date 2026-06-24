@@ -611,3 +611,39 @@ def test_cast_delay_padding_applied_once_with_repeat():
     assert len(_apply_repeat_and_cast_delay(content, repeat=1, cast_delay=2000)) == 3000
     # Neither: segment unchanged.
     assert len(_apply_repeat_and_cast_delay(content, repeat=1, cast_delay=0)) == 1000
+
+
+def test_cloud_legacy_name_not_prefixed_to_nonexistent_entity():
+    """A bare provider with no matching tts.* entity keeps its legacy name.
+
+    Nabu Casa cloud is reachable as the legacy "cloud" engine but its entity is
+    tts.home_assistant_cloud, so blindly prefixing to tts.cloud broke playback
+    with "The tts.cloud platform was not found".
+    """
+    from custom_components.chime_tts.helpers.tts_audio_helper import TTSAudioHelper
+
+    class _States:
+        def __init__(self, ids):
+            self._ids = set(ids)
+
+        def get(self, entity_id):
+            return object() if entity_id in self._ids else None
+
+    class _Hass:
+        def __init__(self, ids):
+            self.states = _States(ids)
+
+    # cloud: entity is tts.home_assistant_cloud, no tts.cloud exists -> keep legacy.
+    hass = _Hass(["tts.home_assistant_cloud"])
+    assert TTSAudioHelper._resolve_engine_id(hass, "cloud") == "cloud"
+
+    # A provider whose entity follows the tts.<name> pattern is promoted.
+    assert (
+        TTSAudioHelper._resolve_engine_id(_Hass(["tts.piper"]), "piper") == "tts.piper"
+    )
+
+    # An already-qualified entity id is left untouched.
+    assert (
+        TTSAudioHelper._resolve_engine_id(hass, "tts.home_assistant_cloud")
+        == "tts.home_assistant_cloud"
+    )

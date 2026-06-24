@@ -148,11 +148,29 @@ class TTSAudioHelper:
                     )
         return language
 
+    @staticmethod
+    def _resolve_engine_id(hass: HomeAssistant, tts_platform):
+        """Return the engine id to hand to generate_media_source_id.
+
+        A bare provider name is promoted to its ``tts.*`` entity id only when
+        that entity exists. Some providers (notably Nabu Casa "cloud") resolve
+        only by their legacy provider name and expose a differently named entity
+        (``tts.home_assistant_cloud``), so blindly prefixing would yield a
+        non-existent ``tts.cloud`` engine that fails with "Invalid TTS provider
+        selected". In that case the legacy name is kept, which HA still resolves.
+        """
+        if (
+            tts_platform
+            and not tts_platform.startswith("tts.")
+            and hass.states.get(f"tts.{tts_platform}") is not None
+        ):
+            return f"tts.{tts_platform}"
+        return tts_platform
+
     async def _generate_tts_audio(self, hass: HomeAssistant, tts_platform, message, language, cache, tts_options, is_fallback: bool = False):
         media_source_id = None
         audio_data = None
-        if not tts_platform.startswith("tts."):
-            tts_platform = f"tts.{tts_platform}"
+        tts_platform = self._resolve_engine_id(hass, tts_platform)
         try:
             timeout = int(self._data.get(TTS_TIMEOUT_KEY, TTS_TIMEOUT_DEFAULT))
             queue_timeout = int(self._data.get(QUEUE_TIMEOUT_KEY, QUEUE_TIMEOUT_DEFAULT))
