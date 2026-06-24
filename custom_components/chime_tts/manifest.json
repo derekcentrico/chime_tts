@@ -7,13 +7,13 @@
     "media_source"
   ],
   "codeowners": [
-    "@nimroddolev"
+    "@derekcentrico"
   ],
   "config_flow": true,
-  "documentation": "https://nimroddolev.github.io/chime_tts",
+  "documentation": "https://github.com/derekcentrico/chime_tts",
   "integration_type": "service",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/nimroddolev/chime_tts/issues",
+  "issue_tracker": "https://github.com/derekcentrico/chime_tts/issues",
   "requirements": [
     "pydub",
     "aiofiles"
