@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import logging
 import os
 import shutil
+from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 import pytest
+from pydub import AudioSegment
 
 from custom_components.chime_tts.helpers.filesystem import FilesystemHelper
 
@@ -108,13 +115,7 @@ async def test_async_path_url_and_file_operations(
     assert source.exists() is False
 
     monkeypatch.setattr(helper, "async_load_audio", AsyncMock(return_value=None))
-    response = SimpleNamespace(
-        headers={"Content-Type": "audio/mpeg"},
-        content=b"x",
-        raise_for_status=lambda: None,
-    )
-    module = importlib.import_module("custom_components.chime_tts.helpers.filesystem")
-    monkeypatch.setattr(module.requests, "get", lambda url: response)
+    monkeypatch.setattr(helper, "_async_fetch_chime", AsyncMock(return_value=b"x"))
     assert (
         await helper.async_download_file(
             hass, "https://example.com/sound.mp3", str(target_dir)
@@ -200,3 +201,229 @@ async def test_folder_creation_and_copy_run_in_executor(tmp_path: Path) -> None:
 
     assert os.remove in hass.executor_calls
     assert existing.exists() is False
+
+
+_DOWNLOAD_LIMIT = 1024
+
+
+async def _audio(request: web.Request) -> web.Response:
+    """Serve a small body with the content type named in the query string."""
+    content_type = request.query.get("type", "audio/mpeg")
+    return web.Response(body=b"chime", headers={"Content-Type": content_type})
+
+
+async def _large(request: web.Request) -> web.Response:
+    """Serve a body over the limit with an accurate Content-Length."""
+    return web.Response(body=b"x" * (_DOWNLOAD_LIMIT * 2), content_type="audio/mpeg")
+
+
+async def _large_chunked(request: web.Request) -> web.StreamResponse:
+    """Stream a body over the limit without a Content-Length."""
+    response = web.StreamResponse(headers={"Content-Type": "audio/mpeg"})
+    response.enable_chunked_encoding()
+    await response.prepare(request)
+    for _ in range(8):
+        await response.write(b"x" * (_DOWNLOAD_LIMIT // 2))
+    await response.write_eof()
+    return response
+
+
+async def _slow(request: web.Request) -> web.StreamResponse:
+    """Trickle a body one byte at a time so only a total timeout can stop it."""
+    response = web.StreamResponse(headers={"Content-Type": "audio/mpeg"})
+    response.enable_chunked_encoding()
+    await response.prepare(request)
+    for _ in range(20):
+        await response.write(b"x")
+        await asyncio.sleep(0.1)
+    await response.write_eof()
+    return response
+
+
+async def _redirect(request: web.Request) -> web.Response:
+    """Redirect through a chain of hops before serving audio."""
+    hops = int(request.match_info["hops"])
+    if hops <= 0:
+        raise web.HTTPFound("/audio")
+    raise web.HTTPFound(f"/redirect/{hops - 1}")
+
+
+async def _missing(request: web.Request) -> web.Response:
+    """Return a 404."""
+    raise web.HTTPNotFound
+
+
+@pytest.fixture
+async def chime_server(socket_enabled: None) -> AsyncIterator[TestServer]:
+    """Run a local HTTP server that serves chime responses."""
+    app = web.Application()
+    app.router.add_get("/audio", _audio)
+    app.router.add_get("/large", _large)
+    app.router.add_get("/large-chunked", _large_chunked)
+    app.router.add_get("/slow", _slow)
+    app.router.add_get("/redirect/{hops}", _redirect)
+    app.router.add_get("/missing", _missing)
+    server = TestServer(app)
+    await server.start_server()
+    yield server
+    await server.close()
+
+
+class ThreadedHass(Hass):
+    """Facade whose executor jobs run off the loop, as in Home Assistant."""
+
+    async def async_add_executor_job(self, func, *args):
+        """Run executor jobs in a worker thread."""
+        return await asyncio.to_thread(func, *args)
+
+
+@pytest.fixture
+async def download_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[FilesystemHelper, Hass, list[bytes]]]:
+    """Filesystem helper on a real aiohttp session with pydub stubbed out."""
+    module = importlib.import_module("custom_components.chime_tts.helpers.filesystem")
+    # The aiodns resolver leaves a pycares thread behind, which HA's cleanup check rejects
+    session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver())
+    )
+    monkeypatch.setattr(
+        module, "async_get_clientsession", lambda hass: session, raising=False
+    )
+    monkeypatch.setattr(
+        module, "CHIME_DOWNLOAD_MAX_BYTES", _DOWNLOAD_LIMIT, raising=False
+    )
+    monkeypatch.setattr(module, "CHIME_DOWNLOAD_TIMEOUT", 0.5, raising=False)
+
+    loaded: list[bytes] = []
+
+    async def load_audio(file) -> AudioSegment:
+        loaded.append(file.getvalue())
+        return AudioSegment.silent(duration=500)
+
+    helper = FilesystemHelper()
+    monkeypatch.setattr(helper, "async_load_audio", load_audio)
+    monkeypatch.setattr(
+        helper,
+        "async_save_audio_to_folder",
+        AsyncMock(return_value=str(tmp_path / "chime.mp3")),
+    )
+    yield helper, ThreadedHass(tmp_path), loaded
+    await session.close()
+
+
+async def test_download_chime_success(
+    chime_server: TestServer, download_helper, tmp_path: Path
+) -> None:
+    """An audio response is loaded, saved, and returned with its duration."""
+    helper, hass, loaded = download_helper
+    result = await helper.async_download_file(
+        hass, str(chime_server.make_url("/audio")), str(tmp_path)
+    )
+    assert result == {
+        "local_path": str(tmp_path / "chime.mp3"),
+        "audio_duration": 0.5,
+    }
+    assert loaded == [b"chime"]
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/octet-stream", "AUDIO/MPEG", "Audio/Ogg; codecs=opus"],
+)
+async def test_download_chime_accepts_audio_content_types(
+    chime_server: TestServer, download_helper, tmp_path: Path, content_type: str
+) -> None:
+    """octet-stream and audio types are accepted regardless of case."""
+    helper, hass, loaded = download_helper
+    url = chime_server.make_url("/audio").with_query(type=content_type)
+    assert await helper.async_download_file(hass, str(url), str(tmp_path)) is not None
+    assert loaded == [b"chime"]
+
+
+async def test_download_chime_rejects_non_audio(
+    chime_server: TestServer, download_helper, tmp_path: Path
+) -> None:
+    """A non-audio response is not decoded."""
+    helper, hass, loaded = download_helper
+    url = chime_server.make_url("/audio").with_query(type="text/html")
+    assert await helper.async_download_file(hass, str(url), str(tmp_path)) is None
+    assert loaded == []
+
+
+async def test_download_chime_rejects_http_error(
+    chime_server: TestServer, download_helper, tmp_path: Path
+) -> None:
+    """A non-2xx status is reported and nothing is decoded."""
+    helper, hass, loaded = download_helper
+    url = str(chime_server.make_url("/missing"))
+    assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+    assert loaded == []
+
+
+async def test_download_chime_rejects_oversize_content_length(
+    chime_server: TestServer,
+    download_helper,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A Content-Length over the cap is rejected before the body is read."""
+    helper, hass, loaded = download_helper
+    url = str(chime_server.make_url("/large"))
+    with caplog.at_level(logging.WARNING):
+        assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+    assert loaded == []
+    assert f"is {_DOWNLOAD_LIMIT * 2} bytes" in caplog.text
+
+
+async def test_download_chime_rejects_oversize_stream(
+    chime_server: TestServer,
+    download_helper,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A chunked body that grows past the cap is abandoned mid-stream."""
+    helper, hass, loaded = download_helper
+    url = str(chime_server.make_url("/large-chunked"))
+    with caplog.at_level(logging.WARNING):
+        assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+    assert loaded == []
+    assert "exceeded the" in caplog.text
+
+
+async def test_download_chime_total_timeout(
+    chime_server: TestServer,
+    download_helper,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A server that keeps trickling bytes is cut off by the total timeout."""
+    helper, hass, loaded = download_helper
+    url = str(chime_server.make_url("/slow"))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with caplog.at_level(logging.WARNING):
+        assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+    assert loop.time() - started < 1.5
+    assert loaded == []
+    assert "Timeout Error" in caplog.text
+
+
+async def test_download_chime_follows_redirects(
+    chime_server: TestServer, download_helper, tmp_path: Path
+) -> None:
+    """Redirects within the limit are followed to the audio."""
+    helper, hass, loaded = download_helper
+    url = str(chime_server.make_url("/redirect/2"))
+    assert await helper.async_download_file(hass, url, str(tmp_path)) is not None
+    assert loaded == [b"chime"]
+
+
+async def test_download_chime_rejects_too_many_redirects(
+    chime_server: TestServer, download_helper, tmp_path: Path
+) -> None:
+    """A redirect chain longer than the limit is abandoned."""
+    helper, hass, loaded = download_helper
+    url = str(chime_server.make_url("/redirect/6"))
+    assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+    assert loaded == []
