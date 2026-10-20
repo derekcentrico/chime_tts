@@ -526,3 +526,38 @@ def test_delete_generated_audio_files_tolerates_missing_folder(tmp_path: Path) -
     assert helper.delete_generated_audio_files(str(tmp_path / "missing")) == 0
     assert helper.delete_generated_audio_files("") == 0
     assert helper.delete_generated_audio_files(None) == 0
+
+
+def test_delete_file_tolerates_a_file_removed_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file deleted between the existence check and os.remove is not an error."""
+    helper = FilesystemHelper()
+    missing = tmp_path / "gone.mp3"
+    monkeypatch.setattr(helper, "path_exists", lambda path: True)
+
+    helper.delete_file(Hass(tmp_path), str(missing))
+
+    assert not missing.exists()
+
+
+def test_delete_generated_audio_files_skips_files_removed_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep keeps going when another clear removed a file first."""
+    helper = FilesystemHelper()
+    for name in ("0123456789abcdef0123456789abcdef.mp3", "fedcba9876543210fedcba9876543210.mp3"):
+        (tmp_path / name).write_bytes(b"audio")
+    real_remove = os.remove
+    calls = {"n": 0}
+
+    def remove_once_raced(path):
+        calls["n"] += 1
+        real_remove(path)
+        if calls["n"] == 1:
+            raise FileNotFoundError(path)
+
+    monkeypatch.setattr(os, "remove", remove_once_raced)
+
+    assert helper.delete_generated_audio_files(str(tmp_path)) == 1
+    assert list(tmp_path.iterdir()) == []

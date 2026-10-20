@@ -376,12 +376,15 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
 
             # Files from uncached calls (say_url defaults to cache: false) are
             # never recorded in storage, so sweep the www folder as well (#342)
-            if clear_www_tts_cache:
+            www_path = _data.get(WWW_PATH_KEY)
+            if clear_www_tts_cache and is_integration_www_folder(www_path):
                 removed = await hass.async_add_executor_job(
                     filesystem_helper.delete_generated_audio_files,
-                    _data.get(WWW_PATH_KEY),
+                    www_path,
                 )
-                _LOGGER.debug("Removed %s uncached audio file(s) from %s", removed, _data.get(WWW_PATH_KEY))
+                _LOGGER.debug("Removed %s uncached audio file(s) from %s", removed, www_path)
+            elif clear_www_tts_cache:
+                _LOGGER.debug("Skipping uncached audio sweep: %s is not a dedicated chime_tts folder", www_path)
 
             # CLEAR HA TTS CACHE #
             if clear_ha_tts_cache:
@@ -419,6 +422,18 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
     _data["async_clear_cache"] = async_clear_cache
 
     return True
+
+def is_integration_www_folder(path: str | None) -> bool:
+    """Return True when path is a folder named like the default www folder.
+
+    The sweep matches files by name only, so it is limited to a folder this
+    integration owns rather than a shared one such as the www root.
+    """
+    if not path:
+        return False
+    default_name = os.path.basename(os.path.normpath(WWW_PATH_DEFAULT))
+    return os.path.basename(os.path.normpath(path)) == default_name
+
 
 async def async_run_script(hass: HomeAssistant, script):
     """Run a configured script entity, optionally with YAML-provided variables."""

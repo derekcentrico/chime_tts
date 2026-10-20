@@ -824,6 +824,44 @@ async def test_issue_342_www_folder_is_kept_without_clear_www_tts_cache(
 
 
 @pytest.mark.asyncio
+async def test_issue_342_sweep_skips_a_shared_www_folder(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A www folder that is not chime_tts-specific (eg: the www root) is never swept."""
+    hass = FakeHass()
+    www = tmp_path / "www"
+    www.mkdir()
+    other_file = www / "0123456789abcdef0123456789abcdef.mp3"
+    other_file.write_bytes(b"audio")
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert other_file.exists()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/config/www/chime_tts/", True),
+        ("/config/www/chime_tts", True),
+        ("/media/chime_tts/", True),
+        ("/config/www/", False),
+        ("/config/www/chime_tts/sub/", False),
+        ("/config/www/chime_tts_old/", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_integration_www_folder(path: str | None, expected: bool) -> None:
+    """Only a folder named like the default www folder counts as the integration's own."""
+    assert integration_module.is_integration_www_folder(path) is expected
+
+
+@pytest.mark.asyncio
 async def test_replay_raises_before_first_say(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replay should fail until a prior `say` request has been stored."""
     hass = FakeHass()

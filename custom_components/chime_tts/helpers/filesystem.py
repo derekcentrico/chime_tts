@@ -708,7 +708,11 @@ class FilesystemHelper:
         # If file exists, delete it
         if self.path_exists(file_path):
             _LOGGER.debug("Deleting file %s", file_path)
-            os.remove(file_path)
+            # Overlapping clear_cache calls can remove it first
+            try:
+                os.remove(file_path)
+            except FileNotFoundError:
+                _LOGGER.debug("File %s was already deleted", file_path)
         else:
             _LOGGER.warning("No file at path %s - unable to delete", file_path)
 
@@ -737,6 +741,8 @@ class FilesystemHelper:
                     try:
                         os.remove(entry.path)
                         removed += 1
+                    except FileNotFoundError:
+                        continue
                     except OSError as error:
                         _LOGGER.warning("Unable to delete %s: %s", entry.path, error)
         except FileNotFoundError:
