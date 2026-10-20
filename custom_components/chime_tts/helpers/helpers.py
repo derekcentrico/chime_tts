@@ -121,6 +121,16 @@ _KNOWN_TTS_PROVIDER_ALIASES = {
     "yandex": YANDEX_TTS,
     "yandextts": YANDEX_TTS,
 }
+def ffmpeg_output_path(source_path: str, ffmpeg_args: str) -> str:
+    """Return where FFmpeg output for source_path ends up given ffmpeg_args."""
+    args = (ffmpeg_args or "").split()
+    if "-f" in args:
+        index = args.index("-f")
+        if index + 1 < len(args) and args[index + 1] != "mp3":
+            return f"{os.path.splitext(source_path)[0]}.{args[index + 1]}"
+    return source_path
+
+
 class ChimeTTSHelper:
     """Helper functions for Chime TTS."""
 
@@ -767,8 +777,11 @@ class ChimeTTSHelper:
                     _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to load converted audio segment from file: %s. Error: %s",
                                     str(converted_audio_file), error)
         finally:
+            # An explicit non-mp3 format (eg: -f wav) leaves its output beside the temp file
+            sibling_output = ffmpeg_output_path(temp_audio_file, ffmpeg_args)
             await _async_run_cleanup(
-                self.async_remove_temp_files(hass, [temp_audio_file, converted_audio_file], wait_for=save_job))
+                self.async_remove_temp_files(
+                    hass, [temp_audio_file, converted_audio_file, sibling_output], wait_for=save_job))
 
         return ret_val
 
@@ -837,11 +850,7 @@ class ChimeTTSHelper:
 
             # The converted file replaces the source, unless an explicit non-mp3
             # output type (eg: -f wav) is requested, which is saved alongside it
-            output_file_path = local_file_path
-            if '-f' in ffmpeg_cmd[3:]:
-                index = ffmpeg_cmd.index('-f', 3)
-                if index + 1 < len(ffmpeg_cmd) and ffmpeg_cmd[index + 1] != "mp3":
-                    output_file_path = local_file_path.replace(".mp3", f".{ffmpeg_cmd[index + 1]}")
+            output_file_path = ffmpeg_output_path(local_file_path, ffmpeg_args)
 
             # FFmpeg writes to a unique temp name, then it is moved into place, so
             # concurrent conversions of one file can't clobber each other's output
@@ -881,14 +890,13 @@ class ChimeTTSHelper:
         except Exception as error:
             _LOGGER.error("FFmpeg unexpected error: %s FFmpeg options: %s",
                            error, ffmpeg_cmd_string)
+            return False
 
         finally:
             # Runs on failure and cancellation alike, so partial output never lingers
             if not keep_output and converted_file_path:
                 await _async_run_cleanup(
                     self._async_abort_ffmpeg(hass, ffmpeg_process, converted_file_path, wait_for=move_job))
-
-        return file_path
 
     def add_atempo_values_to_ffmpeg_args_string(self, tempo: float, ffmpeg_args_string: str = None):
         """Add chained FFmpeg atempo filters for values outside its 0.5–2.0 range."""

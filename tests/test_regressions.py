@@ -2012,3 +2012,42 @@ async def test_issue_318_cached_audio_removal_deletes_off_loop(monkeypatch):
     )
 
     assert deletes == [("/media/temp/a.mp3", True), ("/config/www/a.mp3", True)]
+
+
+def test_issue_318_ffmpeg_output_path_only_changes_the_extension():
+    """A '.mp3' inside a folder name must not be rewritten (#318)."""
+    from custom_components.chime_tts.helpers.helpers import ffmpeg_output_path
+
+    assert ffmpeg_output_path("/media/x.mp3_dir/a.mp3", "-f wav") == "/media/x.mp3_dir/a.wav"
+    assert ffmpeg_output_path("/media/a.ogg", "-f wav") == "/media/a.wav"
+    assert ffmpeg_output_path("/media/a.mp3", "-f mp3") == "/media/a.mp3"
+    assert ffmpeg_output_path("/media/a.mp3", "-ar 16000") == "/media/a.mp3"
+
+
+async def test_issue_318_ffmpeg_unexpected_error_reports_failure(monkeypatch, tmp_path):
+    """An unexpected error must not be reported as a successful conversion (#318)."""
+    from pydub.generators import Sine
+
+    source = tmp_path / "source.mp3"
+    Sine(440).to_audio_segment(duration=200).export(str(source), format="mp3")
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _boom)
+    result = await ChimeTTSHelper().async_ffmpeg_convert_from_file(_ThreadedExecHass(), str(source), "-ar 16000")
+
+    assert result is False
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["source.mp3"]
+
+
+async def test_issue_318_segment_conversion_to_other_format_leaves_no_files(tmp_path):
+    """A -f wav segment conversion must not leave its sibling output behind (#318)."""
+    from pydub.generators import Sine
+
+    audio = Sine(440).to_audio_segment(duration=300)
+    await ChimeTTSHelper().async_ffmpeg_convert_from_audio_segment(
+        _ThreadedExecHass(), audio, "-f wav", str(tmp_path)
+    )
+
+    assert list(tmp_path.iterdir()) == []
