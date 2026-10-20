@@ -484,3 +484,45 @@ async def test_download_chime_does_not_inflate_on_the_loop(
     url = str(chime_server.make_url("/gzip"))
     assert await helper.async_download_file(hass, url, str(tmp_path)) is None
     assert inflated == []
+def test_delete_generated_audio_files_only_removes_generated_names(tmp_path: Path) -> None:
+    """Only top-level audio files named like generated output are deleted."""
+    helper = FilesystemHelper()
+    generated = tmp_path / "0123456789abcdef0123456789abcdef.mp3"
+    converted = tmp_path / "0123456789abcdef0123456789abcdef.wav"
+    for path in (generated, converted):
+        path.write_bytes(b"audio")
+    kept = [
+        tmp_path / "doorbell.mp3",
+        tmp_path / "0123456789abcdef0123456789abcdef.txt",
+        tmp_path / "0123456789abcdef0123456789abcdef_converted.mp3",
+        tmp_path / "0123456789ABCDEF0123456789ABCDEF.mp3",
+        tmp_path / "0123456789abcdef0123456789abcde.mp3",
+    ]
+    for path in kept:
+        path.write_bytes(b"keep")
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    nested_file = nested / "0123456789abcdef0123456789abcdef.mp3"
+    nested_file.write_bytes(b"audio")
+    linked_target = tmp_path / "target.mp3"
+    linked_target.write_bytes(b"keep")
+    link = tmp_path / "fedcba9876543210fedcba9876543210.mp3"
+    link.symlink_to(linked_target)
+
+    assert helper.delete_generated_audio_files(f"{tmp_path}/") == 2
+
+    assert not generated.exists()
+    assert not converted.exists()
+    assert all(path.exists() for path in kept)
+    assert nested_file.exists()
+    assert link.is_symlink()
+    assert linked_target.exists()
+
+
+def test_delete_generated_audio_files_tolerates_missing_folder(tmp_path: Path) -> None:
+    """A missing or unset www folder is not an error."""
+    helper = FilesystemHelper()
+
+    assert helper.delete_generated_audio_files(str(tmp_path / "missing")) == 0
+    assert helper.delete_generated_audio_files("") == 0
+    assert helper.delete_generated_audio_files(None) == 0

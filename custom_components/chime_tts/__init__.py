@@ -58,6 +58,7 @@ from .const import (
     LOCAL_PATH_KEY,
     PUBLIC_PATH_KEY,
     SONOS_WWW_PATH_KEY,
+    AUDIO_CACHED_KEY,
     AUDIO_DURATION_KEY,
     FADE_TRANSITION_KEY,
     REMOVE_TEMP_FILE_DELAY_KEY,
@@ -373,6 +374,15 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
                                                      clear_temp_tts_cache,
                                                      clear_www_tts_cache)
 
+            # Files from uncached calls (say_url defaults to cache: false) are
+            # never recorded in storage, so sweep the www folder as well (#342)
+            if clear_www_tts_cache:
+                removed = await hass.async_add_executor_job(
+                    filesystem_helper.delete_generated_audio_files,
+                    _data.get(WWW_PATH_KEY),
+                )
+                _LOGGER.debug("Removed %s uncached audio file(s) from %s", removed, _data.get(WWW_PATH_KEY))
+
             # CLEAR HA TTS CACHE #
             if clear_ha_tts_cache:
                 _LOGGER.debug("Clearing cached Home Assistant TTS audio files...")
@@ -527,8 +537,10 @@ async def async_prepare_media(hass: HomeAssistant, params, options, media_player
             # Optional script to run after playback (#310)
             await async_run_script(hass, params.get("post_script"))
 
-            # Remove temporary local generated mp3
-            if not bool(params.get("cache", False)):
+            # Remove temporary local generated mp3. Audio requested with
+            # cache: true can still go uncached (eg: fallback TTS audio), and
+            # nothing else would clean those files up.
+            if not audio_dict.get(AUDIO_CACHED_KEY, bool(params.get("cache", False))):
                 remove_temp_file_delay_s = float(_data[REMOVE_TEMP_FILE_DELAY_KEY] / 1000)
                 if remove_temp_file_delay_s > 0:
                     _LOGGER.debug("Waiting %ss before removing temporary file%s:", str(remove_temp_file_delay_s), "s" if local_path and public_path else "")
@@ -1199,6 +1211,7 @@ async def async_get_playback_audio_path(params: dict, options: dict):
         await async_add_audio_file_to_cache(hass, audio_dict.get(LOCAL_PATH_KEY, None), duration, params, options)
 
     await async_add_sonos_www_copy(hass, audio_dict, entity_ids, filepath_hash, is_cached)
+    audio_dict[AUDIO_CACHED_KEY] = is_cached
 
     return audio_dict
 
@@ -1252,6 +1265,16 @@ async def async_cache_sonos_www_path(hass: HomeAssistant, filepath_hash: str, ww
     if isinstance(cached, dict):
         cached[SONOS_WWW_PATH_KEY] = www_path
         await async_store_data(hass, filepath_hash, cached)
+
+async def async_delete_sonos_www_copy(hass: HomeAssistant, audio_dict: dict) -> None:
+    """Delete the Sonos www copy recorded on audio_dict, if it is still on disk."""
+    www_path = audio_dict.get(SONOS_WWW_PATH_KEY)
+    if not www_path:
+        return
+    if await hass.async_add_executor_job(filesystem_helper.path_exists, www_path):
+        _LOGGER.debug("...removing Sonos public file %s", www_path)
+        await hass.async_add_executor_job(filesystem_helper.delete_file, hass, www_path)
+    audio_dict[SONOS_WWW_PATH_KEY] = None
 
 def get_sonos_media_content_id(hass: HomeAssistant, audio_dict: dict):
     """Return a relative /local/ URL for the Sonos www copy, or None.
@@ -1327,6 +1350,7 @@ async def async_verify_cached_audio(hass: HomeAssistant,
 
         if not (public_exists or local_exists):
             _LOGGER.debug("   No cached audio found on filesystem")
+            await async_delete_sonos_www_copy(hass, audio_dict)
             await async_delete_data(hass=hass, key=filepath_hash)
             return None
 
@@ -2189,11 +2213,14 @@ async def async_remove_cached_audio_data(hass: HomeAssistant,
             await filesystem_helper.async_delete_file(hass, value)
             audio_dict[SONOS_WWW_PATH_KEY] = None
 
-    # Remove key/value from integration storage if no paths remain
+    # Remove key/value from integration storage if no paths remain. The Sonos
+    # copy is made from the local file and is useless without the entry, so
+    # drop it too rather than leave it orphaned in www.
     if (
         audio_dict.get(LOCAL_PATH_KEY, None) is None
         and audio_dict.get(PUBLIC_PATH_KEY, None) is None
     ):
+        await async_delete_sonos_www_copy(hass, audio_dict)
         await async_delete_data(hass, filepath_hash)
 
 

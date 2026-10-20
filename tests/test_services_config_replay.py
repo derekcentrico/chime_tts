@@ -781,6 +781,46 @@ async def test_clear_cache_survives_entries_removed_from_the_live_cache(
     await clear_cache_handler(SimpleNamespace(data={"clear_temp_tts_cache": True}))
 
     assert live == {}
+async def test_issue_342_clear_www_cache_removes_uncached_say_url_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """say_url files are never recorded in storage, so clear_cache must sweep www for them."""
+    hass = FakeHass()
+    www = tmp_path / "www" / "chime_tts"
+    www.mkdir(parents=True)
+    say_url_file = www / "0123456789abcdef0123456789abcdef.mp3"
+    say_url_file.write_bytes(b"audio")
+    user_file = www / "doorbell.mp3"
+    user_file.write_bytes(b"audio")
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert not say_url_file.exists()
+    assert user_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_issue_342_www_folder_is_kept_without_clear_www_tts_cache(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The www sweep only runs when clear_www_tts_cache is requested."""
+    hass = FakeHass()
+    www = tmp_path / "www" / "chime_tts"
+    www.mkdir(parents=True)
+    say_url_file = www / "0123456789abcdef0123456789abcdef.mp3"
+    say_url_file.write_bytes(b"audio")
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_temp_tts_cache": True}))
+
+    assert say_url_file.exists()
 
 
 @pytest.mark.asyncio
