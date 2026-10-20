@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
+import errno
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
+import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -1714,6 +1718,90 @@ def _serialize_notify_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return serialized
 
 
+class ConfigurationYamlWriteError(HomeAssistantError):
+    """configuration.yaml could not be written."""
+
+
+_READ_ONLY_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
+def _write_text_in_place(path: str, content: str) -> None:
+    """Overwrite path directly, for files that cannot be replaced."""
+    with open(path, "w", encoding="utf-8") as target_file:
+        target_file.write(content)
+        target_file.flush()
+        os.fsync(target_file.fileno())
+
+
+def _write_text_atomically(path: str, content: str) -> None:
+    """Replace path with content so a crash never leaves it truncated."""
+    # Resolve symlinks so a linked configuration.yaml stays a link.
+    target = os.path.realpath(path)
+    try:
+        current = os.stat(target)
+    except FileNotFoundError:
+        current = None
+    # Replacing via rename would bypass a read-only mode on the file itself.
+    if current is not None and (
+        not current.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+        or not os.access(target, os.W_OK)
+    ):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), target)
+
+    fd, temp_path = tempfile.mkstemp(
+        dir=os.path.dirname(target),
+        prefix=f".{os.path.basename(target)}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.chmod(temp_path, stat.S_IMODE(current.st_mode) if current else 0o644)
+        if current is not None and hasattr(os, "chown"):
+            # Keep the owner the user set. Needs root, so ignore failures.
+            with contextlib.suppress(OSError):
+                os.chown(temp_path, current.st_uid, current.st_gid)
+        try:
+            os.replace(temp_path, target)
+        except OSError as error:
+            # A file bind-mounted into a container cannot be renamed over.
+            if error.errno not in (errno.EBUSY, errno.EXDEV):
+                raise
+            os.unlink(temp_path)
+            _write_text_in_place(target, content)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_path)
+        raise
+
+
+def _write_configuration_yaml(hass, loaded: dict[str, Any]) -> None:
+    """Write configuration.yaml, raising ConfigurationYamlWriteError on failure."""
+    # Serialize first so a dump error cannot touch the file.
+    content = yaml.dump(
+        loaded,
+        Dumper=_ChimeTTSYamlDumper,
+        allow_unicode=False,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+    config_path = _configuration_yaml_path(hass)
+    try:
+        _write_text_atomically(config_path, content)
+    except OSError as error:
+        if error.errno in _READ_ONLY_ERRNOS:
+            raise ConfigurationYamlWriteError(
+                f"{config_path} is read-only, so notification profiles were not "
+                "saved. Add them to the notify section of configuration.yaml "
+                "manually."
+            ) from error
+        raise ConfigurationYamlWriteError(
+            f"Could not write {config_path}: {error.strerror or error}"
+        ) from error
+
+
 def save_notify_profiles(hass, profiles: list[dict[str, Any]]) -> None:
     """Persist Chime TTS notify profiles into configuration.yaml."""
     loaded = _load_configuration_yaml(hass)
@@ -1735,16 +1823,7 @@ def save_notify_profiles(hass, profiles: list[dict[str, Any]]) -> None:
     else:
         loaded.pop("notify", None)
 
-    config_path = _configuration_yaml_path(hass)
-    with open(config_path, "w", encoding="utf-8") as config_file:
-        yaml.dump(
-            loaded,
-            config_file,
-            Dumper=_ChimeTTSYamlDumper,
-            allow_unicode=False,
-            default_flow_style=False,
-            sort_keys=False,
-        )
+    _write_configuration_yaml(hass, loaded)
 
 
 async def async_load_notify_profiles(

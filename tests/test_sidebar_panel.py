@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import inspect
 import importlib
 import logging
+import os
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
+import stat
 import time
 from types import SimpleNamespace
 import yaml
@@ -2307,6 +2310,24 @@ def _write_profile_config(config_file: Path) -> str:
     return original
 
 
+def _new_profile_request(values: dict) -> dict:
+    """Return a save request that adds a new notify profile."""
+    return {
+        "id": 9,
+        "type": "chime_tts/save_settings",
+        "values": values,
+        "notify_profiles": [
+            {"name": "arrival", "entity_id": "media_player.kitchen"},
+        ],
+    }
+
+
+def _config_dir_files(config_dir: Path) -> list[str]:
+    """Return the names of regular files directly inside config_dir."""
+    return sorted(path.name for path in config_dir.iterdir() if path.is_file())
+
+
+@pytest.mark.asyncio
 async def test_issue_352_save_without_notify_profiles_key_keeps_profiles(
     tmp_path: Path,
 ) -> None:
@@ -2431,3 +2452,145 @@ def test_custom_chimes_mutation_guard_resolves_link_parent_segments(tmp_path: Pa
     with pytest.raises(PermissionError):
         settings_module.delete_browser_entry(hass, config_entry, CUSTOM_CHIMES_PATH_KEY, sneaky)
     assert secret.exists()
+@pytest.mark.asyncio
+async def test_issue_352_failed_write_leaves_configuration_yaml_intact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure while replacing configuration.yaml must not truncate it."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    original = _write_profile_config(config_file)
+
+    def fail_replace(src, dst):
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(settings_module.os, "replace", fail_replace)
+    connection = FakeConnection()
+
+    await save_settings_handler(
+        hass, connection, _new_profile_request(dict(config_entry.options))
+    )
+
+    assert connection.results[-1][1]["message_type"] == "error"
+    assert config_file.read_text(encoding="utf-8") == original
+    assert _config_dir_files(paths["config_dir"]) == ["configuration.yaml"]
+
+
+@pytest.mark.asyncio
+async def test_issue_352_write_preserves_mode_and_symlink(tmp_path: Path) -> None:
+    """The atomic write keeps the file mode and writes through a symlink."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    real_dir = tmp_path / "repo"
+    real_dir.mkdir()
+    real_file = real_dir / "configuration.yaml"
+    _write_profile_config(real_file)
+    real_file.chmod(0o640)
+    link = paths["config_dir"].joinpath("configuration.yaml")
+    link.symlink_to(real_file)
+    connection = FakeConnection()
+
+    await save_settings_handler(
+        hass, connection, _new_profile_request(dict(config_entry.options))
+    )
+
+    assert connection.results[-1][1]["message_type"] == "success"
+    assert link.is_symlink()
+    assert stat.S_IMODE(real_file.stat().st_mode) == 0o640
+    saved = yaml.safe_load(real_file.read_text(encoding="utf-8"))
+    assert [entry["name"] for entry in saved["notify"]] == ["arrival"]
+
+
+@pytest.mark.asyncio
+async def test_issue_352_write_falls_back_when_file_is_a_mount_point(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bind-mounted configuration.yaml cannot be replaced, so write it in place."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+
+    def busy_replace(src, dst):
+        raise OSError(errno.EBUSY, "Device or resource busy")
+
+    monkeypatch.setattr(settings_module.os, "replace", busy_replace)
+    connection = FakeConnection()
+
+    await save_settings_handler(
+        hass, connection, _new_profile_request(dict(config_entry.options))
+    )
+
+    assert connection.results[-1][1]["message_type"] == "success"
+    saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    assert [entry["name"] for entry in saved["notify"]] == ["arrival"]
+    assert _config_dir_files(paths["config_dir"]) == ["configuration.yaml"]
+
+
+@pytest.mark.asyncio
+async def test_issue_353_read_only_configuration_yaml_reports_clear_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only configuration.yaml keeps the options save and explains the failure."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    original = _write_profile_config(config_file)
+
+    def read_only_mkstemp(*args, **kwargs):
+        raise OSError(errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(settings_module.tempfile, "mkstemp", read_only_mkstemp)
+    values = dict(config_entry.options)
+    values[INITIAL_DELAY_KEY] = 250
+    connection = FakeConnection()
+
+    await save_settings_handler(hass, connection, _new_profile_request(values))
+
+    assert connection.errors == []
+    payload = connection.results[-1][1]
+    assert payload["message_type"] == "error"
+    assert "read-only" in payload["message"]
+    assert "notify" in payload["message"]
+    assert [profile["name"] for profile in payload["notify_profiles"]] == ["doorbell"]
+    assert config_entry.options[INITIAL_DELAY_KEY] == 250
+    assert config_file.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_issue_353_save_notify_profiles_raises_on_unwritable_directory(
+    tmp_path: Path,
+) -> None:
+    """An unwritable config directory raises the dedicated write error."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_dir = paths["config_dir"]
+    config_file = config_dir.joinpath("configuration.yaml")
+    original = _write_profile_config(config_file)
+    config_file.chmod(0o444)
+    config_dir.chmod(0o555)
+    try:
+        with pytest.raises(settings_module.ConfigurationYamlWriteError):
+            settings_module.save_notify_profiles(
+                hass, [{"name": "arrival", "entity_id": "media_player.kitchen"}]
+            )
+    finally:
+        config_dir.chmod(0o755)
+        config_file.chmod(0o644)
+    assert config_file.read_text(encoding="utf-8") == original
+
+
+def test_issue_353_read_only_file_mode_is_not_replaced(tmp_path: Path) -> None:
+    """A configuration.yaml marked read-only is left alone even in a writable dir."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    original = _write_profile_config(config_file)
+    config_file.chmod(0o444)
+    try:
+        with pytest.raises(settings_module.ConfigurationYamlWriteError, match="read-only"):
+            settings_module.save_notify_profiles(
+                hass, [{"name": "arrival", "entity_id": "media_player.kitchen"}]
+            )
+    finally:
+        config_file.chmod(0o644)
+    assert config_file.read_text(encoding="utf-8") == original
+    assert _config_dir_files(paths["config_dir"]) == ["configuration.yaml"]

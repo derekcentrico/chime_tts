@@ -45,6 +45,7 @@ from .panel_logs import (
 )
 from ..settings import (
     CHIME_FILE_EXTENSIONS,
+    ConfigurationYamlWriteError,
     NotifyProfilesValidationResult,
     async_build_panel_payload,
     async_load_notify_profiles,
@@ -1388,7 +1389,24 @@ async def websocket_save_settings(
         if notify_profiles_changed:
             # Only rewrite configuration.yaml when the notify profiles changed.
             # Saving an unrelated setting must leave the file untouched (#352).
-            await async_save_notify_profiles(hass, notify_validation.data)
+            try:
+                await async_save_notify_profiles(hass, notify_validation.data)
+            except ConfigurationYamlWriteError as error:
+                # The options above are already saved; only the profiles failed.
+                # Report the profiles still on disk so the panel does not show
+                # the rejected edits as saved.
+                LOGGER.error("Chime TTS notify profiles not saved: %s", error)
+                connection.send_result(
+                    msg["id"],
+                    _build_save_settings_result(
+                        values=dict(config_entry.options),
+                        notify_profiles=loaded_notify_profiles,
+                        message=f"Settings saved. {error}",
+                        message_type="error",
+                        restart_required=validation.restart_required,
+                    ),
+                )
+                return
             try:
                 from ..notify import async_reregister_notify_profiles
 
