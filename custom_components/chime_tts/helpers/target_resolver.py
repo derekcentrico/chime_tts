@@ -79,25 +79,6 @@ def _fallback_referenced_entities(hass, sources: Mapping[str, list[str]]) -> set
     return referenced
 
 
-def _expand_groups(hass, entity_ids: set[str]) -> set[str]:
-    """Replace group entities with their members, following nested groups."""
-    result: set[str] = set()
-    pending = list(entity_ids)
-    seen: set[str] = set()
-    while pending:
-        entity_id = pending.pop()
-        if entity_id in seen:
-            continue
-        seen.add(entity_id)
-        if not entity_id.startswith("group."):
-            result.add(entity_id)
-            continue
-        state = hass.states.get(entity_id)
-        members = state.attributes.get("entity_id") if state is not None else None
-        pending.extend(_as_list(members, split_commas=True))
-    return result
-
-
 def resolve_media_player_entity_ids(hass, data: Mapping[str, Any]) -> list[str]:
     """Resolve target sources at execution time and return unique media players."""
     sources = target_sources(data)
@@ -111,7 +92,7 @@ def resolve_media_player_entity_ids(hass, data: Mapping[str, Any]) -> list[str]:
         )
         referenced = selected.referenced | selected.indirectly_referenced
     else:
-        referenced = _expand_groups(hass, _fallback_referenced_entities(hass, sources))
+        referenced = _fallback_referenced_entities(hass, sources)
 
     ordered = _as_list(sources.get("entity_id", []), split_commas=True)
     ordered.extend(sorted(referenced - set(ordered)))

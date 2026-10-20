@@ -1193,7 +1193,7 @@ def test_issue_275_runner_sleeps_after_tagged_call(monkeypatch):
 
 
 def test_issue_275_runner_does_not_sleep_without_tag(monkeypatch):
-    """Untagged, zero, non-numeric and failed calls add no delay; a failed volume_set still plays."""
+    """Untagged, zero, non-numeric and failed calls add no delay."""
     calls = [
         {"domain": "media_player", "service": "play_media", "service_data": {}},
         {"domain": "media_player", "service": "volume_set", "service_data": {}, "delay_after": 0},
@@ -1210,8 +1210,8 @@ def test_issue_275_runner_does_not_sleep_without_tag(monkeypatch):
     ]
     result, events = _fire_calls_with_fake_sleep(monkeypatch, failing, fail_service="volume_set")
 
-    assert result is True
-    assert events == [("call", "play_media")]
+    assert result is False
+    assert events == []
 
 
 def test_issue_275_runner_blocks_only_settle_calls(monkeypatch):
