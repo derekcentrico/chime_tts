@@ -991,3 +991,26 @@ async def test_say_url_accepts_scripts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert integration_module.helpers.async_parse_params.await_args.args[1]["pre_script"] == "script.prepare_speakers"
     assert integration_module.helpers.async_parse_params.await_args.args[1]["post_script"] == "script.restore_speakers"
     assert prepare_media.await_args.args[4] is True
+
+
+async def test_issue_342_sweep_is_not_redirected_by_parent_segments(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured path like jump/../chime_tts must not sweep a linked shared folder."""
+    hass = FakeHass()
+    (tmp_path / "chime_tts").mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    other_file = shared / "0123456789abcdef0123456789abcdef.mp3"
+    other_file.write_bytes(b"audio")
+    (tmp_path / "b" / "sub").mkdir(parents=True)
+    (tmp_path / "b" / "chime_tts").symlink_to(shared, target_is_directory=True)
+    (tmp_path / "jump").symlink_to(tmp_path / "b" / "sub", target_is_directory=True)
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{tmp_path}/jump/../chime_tts/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert other_file.exists()

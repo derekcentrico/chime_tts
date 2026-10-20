@@ -378,9 +378,11 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
             # never recorded in storage, so sweep the www folder as well (#342)
             www_path = _data.get(WWW_PATH_KEY)
             if clear_www_tts_cache and await hass.async_add_executor_job(is_integration_www_folder, www_path):
+                # Sweep the folder the guard resolved, not a re-resolution of
+                # the raw path, so "link/../chime_tts" can't land elsewhere.
                 removed = await hass.async_add_executor_job(
                     filesystem_helper.delete_generated_audio_files,
-                    www_path,
+                    await hass.async_add_executor_job(os.path.realpath, www_path),
                 )
                 _LOGGER.debug("Removed %s uncached audio file(s) from %s", removed, www_path)
             elif clear_www_tts_cache:
@@ -434,7 +436,7 @@ def is_integration_www_folder(path: str | None) -> bool:
     if not path:
         return False
     folder = os.path.normpath(path)
-    if os.path.islink(folder):
+    if os.path.islink(folder) or os.path.islink(path.rstrip("/")):
         return False
     default_name = os.path.basename(os.path.normpath(WWW_PATH_DEFAULT))
     return (
