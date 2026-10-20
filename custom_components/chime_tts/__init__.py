@@ -1140,10 +1140,13 @@ async def async_get_playback_audio_path(params: dict, options: dict):
                 cover_art_filepath = f"{filesystem_helper.path_to_parent_folder('custom_components')}/chime_tts/cover_art.jpg"
                 if await hass.async_add_executor_job(filesystem_helper.path_exists, cover_art_filepath):
                     _LOGGER.debug("Adding cover art to %s", new_audio_file)
-                    new_audio_file = await helpers.async_ffmpeg_convert_from_file(
+                    with_cover_art = await helpers.async_ffmpeg_convert_from_file(
                         hass,
                         new_audio_file,
                         f"-i {cover_art_filepath} -c copy -map 0 -map 1")
+                    # A failed conversion returns False; keep playing the original.
+                    if with_cover_art:
+                        new_audio_file = with_cover_art
 
         # Perform FFmpeg conversion
         if ffmpeg_args:
@@ -1913,7 +1916,11 @@ async def async_prepare_media_service_calls(
 
         # Ensure audio file is Alexa Media Player compatible
         if not await filesystem_helper.async_is_audio_alexa_compatible(hass=hass, file_path=public_file):
-            public_file = await helpers.async_ffmpeg_convert_from_file(hass, public_file, FFMPEG_ARGS_ALEXA)
+            converted_public_file = await helpers.async_ffmpeg_convert_from_file(hass, public_file, FFMPEG_ARGS_ALEXA)
+            if converted_public_file:
+                public_file = converted_public_file
+            else:
+                _LOGGER.warning("Alexa conversion failed; sending the unconverted file: %s", public_file)
 
         # Add service call
         if len(public_file) > 0:
