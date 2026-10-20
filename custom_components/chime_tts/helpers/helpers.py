@@ -13,13 +13,12 @@ from .filesystem import FilesystemHelper
 from ..const import (
     OFFSET_KEY,
     CROSSFADE_KEY,
+    INITIAL_DELAY_KEY,
     TTS_PLATFORM_KEY,
     DEFAULT_LANGUAGE_KEY,
     DEFAULT_VOICE_KEY,
     DEFAULT_TLD_KEY,
     DEFAULT_OFFSET_MS,
-    CAST_PLATFORM,
-    DEFAULT_CAST_DELAY_MS,
     FFMPEG_ARGS_ALEXA,
     FFMPEG_ARGS_VOLUME,
     AMAZON_POLLY,
@@ -38,9 +37,11 @@ from ..const import (
     PIPER,
     VOICE_RSS,
     YANDEX_TTS,
+    NIQQUD_SUPPORTED_TTS_PLATFORMS,
     QUOTE_CHAR_SUBSTITUTE
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.components.media_player.const import ATTR_MEDIA_VOLUME_LEVEL
 
 from pydub import AudioSegment
@@ -48,10 +49,77 @@ from pydub import AudioSegment
 filesystem_helper = FilesystemHelper()
 
 _LOGGER = logging.getLogger(__name__)
+
+TTS_ENTITY_PREFIX = "tts."
+
+# Excludes U+05BE/U+05C0/U+05C3/U+05C6: punctuation, not diacritics. The maqaf
+# separates words, so removing it would join them.
+NIQQUD_PATTERN = re.compile(r"[\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7]")
+
+# Per-language/TLD entities, eg "google_en_com". Narrow, so google_cloud and
+# google_generative_ai do not match.
+GOOGLE_TRANSLATE_ENTITY_PATTERN = re.compile(r"^google_[a-z]{2,3}_[a-z]{2,3}$")
+
+_KNOWN_TTS_PROVIDER_ALIASES = {
+    "amazon_polly": AMAZON_POLLY,
+    "amazonpolly": AMAZON_POLLY,
+    "baidu": BAIDU,
+    "elevenlabs": ELEVENLABS,
+    "tts.elevenlabs": ELEVENLABS,
+    "google_cloud": GOOGLE_CLOUD,
+    "googlecloud": GOOGLE_CLOUD,
+    "tts.google_cloud": GOOGLE_CLOUD,
+    "google_translate": GOOGLE_TRANSLATE,
+    "googletranslate": GOOGLE_TRANSLATE,
+    "ibmwatson": IBM_WATSON_TTS,
+    "watson_tts": IBM_WATSON_TTS,
+    "watsontts": IBM_WATSON_TTS,
+    "marytts": MARYTTS,
+    "microsoft": MICROSOFT_TTS,
+    "microsofttts": MICROSOFT_TTS,
+    "edge_tts": MICROSOFT_EDGE_TTS,
+    "edgetts": MICROSOFT_EDGE_TTS,
+    "microsoftedgetts": MICROSOFT_EDGE_TTS,
+    "cloud": NABU_CASA_CLOUD_TTS,
+    "cloud_say": NABU_CASA_CLOUD_TTS,
+    "cloudsay": NABU_CASA_CLOUD_TTS,
+    "nabucasa": NABU_CASA_CLOUD_TTS,
+    "nabucasacloud": NABU_CASA_CLOUD_TTS,
+    "nabucasacloudtts": NABU_CASA_CLOUD_TTS,
+    "openai_tts": OPENAI_TTS,
+    "openaitts": OPENAI_TTS,
+    "picotts": PICOTTS,
+    "piper": PIPER,
+    "tts.piper": PIPER,
+    "voicerss": VOICE_RSS,
+    "voice_rss": VOICE_RSS,
+    "yandex": YANDEX_TTS,
+    "yandextts": YANDEX_TTS,
+}
 class ChimeTTSHelper:
     """Helper functions for Chime TTS."""
 
     # Services.yaml
+
+    @staticmethod
+    def _coerce_float(value, default: float) -> float:
+        """Convert a nullable service value to float."""
+        if value in (None, ""):
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _coerce_int(value, default: int) -> int:
+        """Convert a nullable service value to int."""
+        if value in (None, ""):
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
 
 
@@ -62,22 +130,53 @@ class ChimeTTSHelper:
 
     # Parameters / Options
 
-    async def async_parse_params(self, hass: HomeAssistant, data, is_say_url, media_player_helper: MediaPlayerHelper):
+    async def async_parse_params(
+        self,
+        hass: HomeAssistant,
+        data,
+        is_say_url,
+        media_player_helper: MediaPlayerHelper,
+        default_data: dict | None = None,
+    ):
         """Parse TTS service parameters."""
+        has_default_data = default_data is not None
+        default_data = default_data or {}
         entity_ids = media_player_helper.parse_entity_ids(data, hass) if is_say_url is False else []
         chime_path =str(data.get("chime_path", ""))
         end_chime_path = str(data.get("end_chime_path", ""))
-        offset = float(data.get("delay", data.get(OFFSET_KEY, DEFAULT_OFFSET_MS)) or 0)
-        crossfade = int(data.get(CROSSFADE_KEY, 0))
-        final_delay = float(data.get("final_delay", 0) or 0)
+        offset = self._coerce_float(
+            data.get(
+                "delay",
+                data.get(OFFSET_KEY, default_data.get(OFFSET_KEY, DEFAULT_OFFSET_MS)),
+            ),
+            default_data.get(OFFSET_KEY, DEFAULT_OFFSET_MS)
+            if has_default_data
+            else 0,
+        )
+        crossfade = self._coerce_int(
+            data.get(CROSSFADE_KEY, default_data.get(CROSSFADE_KEY, 0)),
+            default_data.get(CROSSFADE_KEY, 0),
+        )
+        initial_delay = max(
+            self._coerce_float(
+                data.get(INITIAL_DELAY_KEY, default_data.get(INITIAL_DELAY_KEY, 0)),
+                default_data.get(INITIAL_DELAY_KEY, 0),
+            ),
+            0,
+        )
+        final_delay = self._coerce_float(data.get("final_delay", 0), 0)
         message = str(data.get("message", ""))
         tts_platform = str(data.get("tts_platform", ""))
-        tts_speed = float(data.get("tts_playback_speed", data.get("tts_speed", 100)) or 100)
-        tts_pitch = data.get("tts_pitch", 0) or 0
+        tts_speed = self._coerce_float(
+            data.get("tts_playback_speed", data.get("tts_speed", 100)),
+            100,
+        )
+        tts_pitch = self._coerce_float(data.get("tts_pitch", 0), 0)
         try:
-            repeat = max(int(data.get("repeat", 1) or 1), 1)
+            repeat = max(int(data.get("repeat", 0) or 0), 0)
         except (ValueError, TypeError):
-            repeat = 1
+            repeat = 0
+        repeat_delay = max(self._coerce_float(data.get("repeat_delay", 0), 0), 0)
         pre_script = data.get("pre_script", None)
         post_script = data.get("post_script", None)
         volume_level = data.get(ATTR_MEDIA_VOLUME_LEVEL, -1) or -1
@@ -87,6 +186,10 @@ class ChimeTTSHelper:
         cache = data.get("cache", False) or False
         announce = data.get("announce", False) or False
         fade_audio = data.get("fade_audio", False) or False
+        extra = data.get("extra", None)
+        if extra is not None and not isinstance(extra, dict):
+            _LOGGER.warning("Ignoring media_player extra because it is not a dictionary")
+            extra = None
         media_players_array = await media_player_helper.async_initialize_media_players(
             hass, entity_ids, volume_level, join_players, unjoin_players, announce, fade_audio
         ) if is_say_url is False else []
@@ -94,20 +197,6 @@ class ChimeTTSHelper:
         # No valid media players included
         if len(media_players_array) == 0 and is_say_url is False:
             return None
-
-        # Leading silence for Google Cast targets. Honour an explicit `cast_delay`
-        # (including 0 to disable), otherwise apply the default only when a Cast
-        # player is among the targets so non-Cast playback is unaffected.
-        if "cast_delay" in data and data.get("cast_delay") is not None:
-            # Accept templated/float strings like "2000.0" without raising.
-            try:
-                cast_delay = max(int(float(data.get("cast_delay") or 0)), 0)
-            except (ValueError, TypeError):
-                cast_delay = 0
-        elif media_player_helper.get_media_players_of_platform(entity_ids, CAST_PLATFORM):
-            cast_delay = DEFAULT_CAST_DELAY_MS
-        else:
-            cast_delay = 0
 
         # FFmpeg arguments
         ffmpeg_args: str = self.parse_ffmpeg_args(data.get("audio_conversion", None))
@@ -120,6 +209,7 @@ class ChimeTTSHelper:
             "cache": cache,
             "offset": offset,
             "crossfade": crossfade,
+            "initial_delay": initial_delay,
             "final_delay": final_delay,
             "message": message,
             "language": language,
@@ -127,11 +217,12 @@ class ChimeTTSHelper:
             "tts_speed": tts_speed,
             "tts_pitch": tts_pitch,
             "repeat": repeat,
-            "cast_delay": cast_delay,
+            "repeat_delay": repeat_delay,
             "pre_script": pre_script,
             "post_script": post_script,
             "announce": announce,
             "fade_audio": fade_audio,
+            "extra": extra,
             "volume_level": volume_level,
             "join_players": join_players,
             "unjoin_players": unjoin_players,
@@ -230,14 +321,31 @@ class ChimeTTSHelper:
 
     def remove_niqqud(self, message_text: str):
         """Replace Hebrew niqqud characters with non-voweled characters."""
-        # Unicode range for Hebrew niqqud is \u0591 to \u05C7
-        niqqud_pattern = re.compile(r'[\u0591-\u05C7]')
-        cleaned_text = niqqud_pattern.sub('', message_text)
-        return cleaned_text
+        return NIQQUD_PATTERN.sub("", message_text)
+
+    def normalize_tts_platform_name(self, tts_platform: str):
+        """Reduce a TTS platform name or TTS entity_id to its bare platform name."""
+        if not tts_platform:
+            return ""
+        normalized = self.get_stripped_tts_platform(str(tts_platform)).lower()
+        if normalized.startswith(TTS_ENTITY_PREFIX):
+            normalized = normalized[len(TTS_ENTITY_PREFIX):]
+        if (normalized.startswith(GOOGLE_TRANSLATE)
+                or GOOGLE_TRANSLATE_ENTITY_PATTERN.match(normalized)):
+            normalized = GOOGLE_TRANSLATE
+        return normalized
+
+    def supports_niqqud(self, tts_platform: str):
+        """Return whether the TTS platform pronounces Hebrew niqqud. Unknown platforms do not."""
+        supported = {
+            self.normalize_tts_platform_name(platform)
+            for platform in NIQQUD_SUPPORTED_TTS_PLATFORMS
+        }
+        return self.normalize_tts_platform_name(tts_platform) in supported
 
     def parse_message(self, message_string: str):
         """Parse the message string/YAML object into segments dictionary."""
-        message_string = self.remove_niqqud(message_string)
+        message_string = str(message_string)
         segments = []
         if len(message_string) == 0 or message_string == "None":
             return []
@@ -361,28 +469,42 @@ class ChimeTTSHelper:
                          hass,
                          tts_platform: str = "",
                          default_tts_platform: str = "",
-                         fallback_tts_platform: str = ""):
+                         fallback_tts_platform: str = "",
+                         allow_configured_fallbacks: bool = True):
         """TTS platform/entity_id to use for TTS audio."""
 
         installed_tts_platforms: list[str] = self.get_installed_tts_platforms(hass)
+        requested_candidates: list[str] = []
+        for candidate in (
+            tts_platform,
+            default_tts_platform if allow_configured_fallbacks else "",
+            fallback_tts_platform if allow_configured_fallbacks else "",
+        ):
+            normalized_candidate = str(candidate or "").strip()
+            if (
+                normalized_candidate
+                and normalized_candidate not in requested_candidates
+            ):
+                requested_candidates.append(normalized_candidate)
 
-        # No TTS platform provided
-        if not tts_platform:
-            tts_platform = default_tts_platform if default_tts_platform else fallback_tts_platform
-
-        # Match for deprecated Nabu Casa platform string
-        if tts_platform.lower() == NABU_CASA_CLOUD_TTS_OLD:
-            tts_platform = NABU_CASA_CLOUD_TTS
-
-        selected_platform = self._match_tts_platform(tts_platform, installed_tts_platforms)
-        if selected_platform is None:
-            selected_platform = self._match_google_fallback(tts_platform, installed_tts_platforms)
-
-        if selected_platform is None:
+        if not requested_candidates:
             _LOGGER.warning("Unable to select a TTS platform - installed TTS platforms: %s", installed_tts_platforms)
-        else:
-            _LOGGER.debug("Selected TTS platform: %s", selected_platform)
-        return selected_platform
+            return None
+
+        for candidate in requested_candidates:
+            # Match for deprecated Nabu Casa platform string
+            if candidate.lower() == NABU_CASA_CLOUD_TTS_OLD:
+                candidate = NABU_CASA_CLOUD_TTS
+
+            selected_platform = self._match_tts_platform(candidate, installed_tts_platforms)
+            if selected_platform is None:
+                selected_platform = self._match_google_fallback(candidate, installed_tts_platforms)
+            if selected_platform is not None:
+                _LOGGER.debug("Selected TTS platform: %s", selected_platform)
+                return selected_platform
+
+        _LOGGER.warning("Unable to select a TTS platform - installed TTS platforms: %s", installed_tts_platforms)
+        return None
 
     @staticmethod
     def _match_tts_platform(requested: str, installed: list[str]):
@@ -472,40 +594,100 @@ class ChimeTTSHelper:
         return tts_provider
 
     def get_installed_tts_platforms(self, hass: HomeAssistant) -> list[str]:
-        """Installed TTS platforms as full tts.* entity ids plus legacy names."""
+        """Return live TTS entity ids that Home Assistant can use for audio generation."""
         platforms: list[str] = []
-
-        # 2025.8+: TTS providers are exposed as tts.* entities. Keep the full
-        # entity id; truncating it (tts.google_generative_ai -> google) is what
-        # broke platform matching for multi-word providers (#291, #308, #241).
         try:
-            for entity in hass.states.async_all():
-                entity_id = str(entity.entity_id)
-                if entity_id.startswith("tts.") and entity_id not in platforms:
-                    platforms.append(entity_id)
-        except Exception as e:
-            _LOGGER.debug("Entity-based TTS detection failed: %s", e)
+            has_cloud_config_entry = any(
+                str(getattr(entry, "domain", "") or "") == "cloud"
+                for entry in hass.config_entries.async_entries()
+            )
+        except (AttributeError, TypeError):
+            has_cloud_config_entry = False
 
-        # Legacy providers (HA < 2025.8) are keyed by provider name.
+        def append_platform(candidate: str) -> None:
+            entity_id = str(candidate or "").strip()
+            if not entity_id.startswith("tts."):
+                return
+            if entity_id.lower() in ("tts.home_assistant_cloud", "tts.cloud") and not has_cloud_config_entry:
+                return
+            if entity_id not in platforms:
+                platforms.append(entity_id)
+
+        try:
+            from homeassistant.components.tts.const import DATA_COMPONENT as TTS_DATA_COMPONENT
+
+            component = hass.data.get(TTS_DATA_COMPONENT)
+            for entity in getattr(component, "entities", []) or []:
+                append_platform(str(getattr(entity, "entity_id", "") or ""))
+        except Exception as e:
+            _LOGGER.debug("Component-based TTS detection failed: %s", e)
+
+        # States are also live entities and are available in HA versions where
+        # the component's entity collection is not exposed publicly.
+        try:
+            for state in hass.states.async_all("tts"):
+                append_platform(str(getattr(state, "entity_id", "") or ""))
+        except Exception as e:
+            _LOGGER.debug("State-based TTS detection failed: %s", e)
+
+        # Include registry-backed entities as well as the loaded component. During
+        # startup those two sources may become available in a different order, so
+        # returning as soon as the first source has one entity loses late providers.
+        try:
+            entity_registry = er.async_get(hass)
+            for registry_entry in entity_registry.entities.values():
+                entity_id = str(getattr(registry_entry, "entity_id", "") or "")
+                if not entity_id.startswith("tts."):
+                    continue
+                if getattr(registry_entry, "disabled_by", None) is not None:
+                    continue
+                if not getattr(registry_entry, "config_entry_id", None):
+                    continue
+                append_platform(entity_id)
+        except Exception as e:
+            _LOGGER.debug("Registry-based TTS detection failed: %s", e)
+
+        # YAML-configured legacy TTS providers do not create ``tts.*`` entities,
+        # but remain supported by Home Assistant's TTS manager.  Keep their bare
+        # engine ids so service requests can select them; the audio helper maps
+        # those ids to the legacy media-source API.
         try:
             manager = hass.data.get("tts_manager")
-            if manager is not None:
-                for provider in manager.providers:
-                    if provider not in platforms:
-                        platforms.append(provider)
+            for engine_id in getattr(manager, "providers", {}):
+                engine_id = str(engine_id or "").strip()
+                if engine_id and engine_id not in platforms:
+                    platforms.append(engine_id)
         except Exception as e:
-            _LOGGER.debug("Legacy TTS detection failed: %s", e)
-
-        # Service-based providers (tts.<name>_say) without a discoverable entity.
-        for platform in ("google_translate", "cloud", "edge_tts", "openai_tts", "piper"):
-            if platform not in platforms and hass.services.has_service("tts", f"{platform}_say"):
-                platforms.append(platform)
-
-        if not platforms:
-            _LOGGER.warning("Could not detect any TTS platforms; returning common defaults")
-            platforms = ["google_translate", "cloud", "edge_tts"]
+            _LOGGER.debug("Legacy TTS provider detection failed: %s", e)
 
         return sorted(platforms)
+
+    @staticmethod
+    def _normalize_known_tts_provider(candidate: str) -> str:
+        """Return a canonical known TTS provider id or an empty string."""
+        normalized = str(candidate or "").strip().lower()
+        if not normalized:
+            return ""
+
+        collapsed = "".join(character for character in normalized if character.isalnum())
+        if normalized in _KNOWN_TTS_PROVIDER_ALIASES:
+            return str(_KNOWN_TTS_PROVIDER_ALIASES[normalized])
+        if collapsed in _KNOWN_TTS_PROVIDER_ALIASES:
+            return str(_KNOWN_TTS_PROVIDER_ALIASES[collapsed])
+        if normalized.startswith("tts."):
+            suffix = normalized[4:]
+            if suffix in _KNOWN_TTS_PROVIDER_ALIASES:
+                return str(_KNOWN_TTS_PROVIDER_ALIASES[suffix])
+            collapsed_suffix = "".join(character for character in suffix if character.isalnum())
+            if collapsed_suffix in _KNOWN_TTS_PROVIDER_ALIASES:
+                return str(_KNOWN_TTS_PROVIDER_ALIASES[collapsed_suffix])
+            for alias, canonical in _KNOWN_TTS_PROVIDER_ALIASES.items():
+                if suffix.startswith(f"{alias}_"):
+                    return str(canonical)
+        stripped = str(ChimeTTSHelper().get_stripped_tts_platform(normalized) or "").strip()
+        if stripped:
+            return stripped
+        return ""
 
 
 
@@ -652,19 +834,20 @@ class ChimeTTSHelper:
         return file_path
 
     def add_atempo_values_to_ffmpeg_args_string(self, tempo: float, ffmpeg_args_string: str = None):
-        """Add atempo values (supporting values less than 0.5) to an FFmpeg argument string."""
-        tempos = []
-        if tempo < 0.5:
-            tempos = [0.5]
-            remaining = tempo
-            while remaining < 0.5:
-                remaining /= 0.5
-                if remaining >= 0.5:
-                    tempos.append(remaining)
-                    break
-                tempos.append(0.5)
-        else:
-            tempos = [tempo]
+        """Add chained FFmpeg atempo filters for values outside its 0.5–2.0 range."""
+        tempos: list[float] = []
+        remaining = tempo
+
+        # FFmpeg's atempo filter accepts values from 0.5 to 2.0. Preserve the
+        # requested overall tempo by applying enough boundary factors first,
+        # then append the remaining in-range factor.
+        while remaining < 0.5:
+            tempos.append(0.5)
+            remaining /= 0.5
+        while remaining > 2.0:
+            tempos.append(2.0)
+            remaining /= 2.0
+        tempos.append(remaining)
 
         for tempo_n in tempos:
             if ffmpeg_args_string is None:
@@ -764,22 +947,22 @@ class ChimeTTSHelper:
         """Debug log a title string."""
         if len(title) == 0:
             return
-        _LOGGER.debug(f"╔{'═'*(int(len(title) + 2))}╗")
+        _LOGGER.debug(f"╔{'═' * (int(len(title) + 2))}╗")
         _LOGGER.debug(f"║ {title} ║")
-        _LOGGER.debug(f"╚{'═'*(int(len(title) + 2))}╝")
+        _LOGGER.debug(f"╚{'═' * (int(len(title) + 2))}╝")
 
     def debug_subtitle(self, title: str = ""):
         """Debug log a subtitle string."""
         if len(title) == 0:
             return
-        _LOGGER.debug(f"╭{'─'*(int(len(title) + 2))}╮")
+        _LOGGER.debug(f"╭{'─' * (int(len(title) + 2))}╮")
         _LOGGER.debug(f"│ {title} │")
-        _LOGGER.debug(f"╰{'─'*(int(len(title) + 2))}╯")
+        _LOGGER.debug(f"╰{'─' * (int(len(title) + 2))}╯")
 
     def debug_finish(self, title: str = ""):
         """Debug log a subtitle string."""
         if len(title) == 0:
             return
-        _LOGGER.debug(f"╭{'─'*(int(len(title) + 5))}─────╮")
+        _LOGGER.debug(f"╭{'─' * (int(len(title) + 5))}─────╮")
         _LOGGER.debug(f"│──── {title} ────│")
-        _LOGGER.debug(f"╰{'─'*(int(len(title) + 5))}─────╯")
+        _LOGGER.debug(f"╰{'─' * (int(len(title) + 5))}─────╯")

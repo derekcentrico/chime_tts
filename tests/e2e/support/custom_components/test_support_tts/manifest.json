@@ -1,0 +1,9 @@
+{
+  "domain": "test_support_tts",
+  "name": "Test Support TTS",
+  "codeowners": [],
+  "dependencies": [],
+  "documentation": "https://example.invalid/chime-tts-e2e",
+  "iot_class": "local_push",
+  "version": "1.0.0"
+}

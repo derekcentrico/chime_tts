@@ -5,6 +5,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import datetime
 from typing import TypedDict
+from homeassistant.exceptions import HomeAssistantError
 from .const import (
     QUEUE_TIMEOUT_DEFAULT,
     MAX_CONCURRENT_TASKS,
@@ -38,7 +39,7 @@ class ChimeTTSQueueManager:
         while not self._shutdown_event.is_set():
             try:
                 service_call = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             if service_call is None:
@@ -63,7 +64,7 @@ class ChimeTTSQueueManager:
                 except Exception as e:
                     _LOGGER.error("Error setting result for service call %s: %s", service_call, str(e))
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._handle_timeout_error(service_call, start_time)
         except asyncio.CancelledError:
             _LOGGER.info("Service call %s was cancelled", service_call)
@@ -81,7 +82,7 @@ class ChimeTTSQueueManager:
         elapsed_time = f"{completion_time}s" if completion_time >= 1 else f"{completion_time * 1000}ms"
         _LOGGER.warning("Service call %s timed out after %s", service_call, elapsed_time)
         service_call['future'].set_exception(
-            TimeoutError(f"Service call timed out after {elapsed_time} (configured timeout = {self.timeout_s}s)")
+            HomeAssistantError(f"Service call timed out after {elapsed_time} (configured timeout = {self.timeout_s}s)")
         )
 
     async def async_queue_processor(self) -> None:
@@ -133,6 +134,8 @@ class ChimeTTSQueueManager:
                 task = self.queue.get_nowait()
                 if isinstance(task, asyncio.Future):
                     task.cancel()
+                elif isinstance(task, dict) and isinstance(task.get("future"), asyncio.Future):
+                    task["future"].cancel()
                 self.queue.task_done()
             except asyncio.QueueEmpty:
                 break

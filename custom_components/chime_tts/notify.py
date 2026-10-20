@@ -1,13 +1,27 @@
 """Chime TTS Notify."""
 
 import logging
+from typing import Any
+
+from homeassistant.components.notify.legacy import NOTIFY_SERVICES
 from .const import (
     DOMAIN,
     SERVICE_SAY
 )
 from .helpers.helpers import ChimeTTSHelper
+from .helpers.panel_logs import (
+    build_notification_event_details,
+    finish_panel_log_event,
+    start_panel_log_event,
+)
+from . import (
+    ACTIVE_NOTIFY_LOG_EVENT_ID,
+    INTERNAL_NOTIFY_LOG_EVENT_ID,
+    INTERNAL_NOTIFY_ORIGIN,
+)
 from homeassistant.components.notify import BaseNotificationService
 from homeassistant.core import HomeAssistant
+from homeassistant.util import slugify
 
 _LOGGER = logging.getLogger(__name__)
 helpers = ChimeTTSHelper()
@@ -16,6 +30,43 @@ async def async_get_service(hass: HomeAssistant, config, _discovery_info):
     """Retrieve instance of ChimeTTSNotificationService class."""
     _config = config or {}
     return ChimeTTSNotificationService(hass, config)
+
+
+async def async_reregister_notify_profiles(
+    hass: HomeAssistant,
+    profiles: list[dict[str, Any]],
+) -> bool:
+    """Apply updated settings to the currently registered Chime TTS notifiers.
+
+    This intentionally supports only an unchanged set of service names. Adding,
+    removing, or renaming a YAML notify profile still requires Home Assistant to
+    create a different set of legacy notify services during startup.
+    """
+    from .settings import _serialize_notify_profile  # noqa: PLC0415
+
+    services = list(hass.data.get(NOTIFY_SERVICES, {}).get(DOMAIN, []))
+    profile_configs = {
+        slugify(str(profile.get("name") or "")): _serialize_notify_profile(profile)
+        for profile in profiles
+    }
+    service_names = {getattr(service, "_service_name", "") for service in services}
+
+    if (
+        not services
+        or not profile_configs
+        or len(profile_configs) != len(profiles)
+        or service_names != set(profile_configs)
+    ):
+        return False
+
+    for service in services:
+        await service.async_unregister_services()
+
+    for service in services:
+        service._config = profile_configs[service._service_name]
+        await service.async_register_services()
+
+    return True
 
 class ChimeTTSNotificationService(BaseNotificationService):
     """Chime TTS Notify Service class."""
@@ -28,14 +79,32 @@ class ChimeTTSNotificationService(BaseNotificationService):
     async def async_send_message(self, message="", **kwargs):
         """Send a notification with the Chime TTS Notify Service."""
         kwargs["message"] = message
+        original_kwargs = dict(kwargs)
         data = kwargs.get("data", {}) or {}
+        target_keys = ("target", "entity_id", "device_id", "area_id", "floor_id", "label_id")
+        has_target_override = any(key in data for key in target_keys)
+        notify_name = str(self._config.get("name") or "profile")
+        notify_event_id = start_panel_log_event(
+            self.hass,
+            "notification_call",
+            "Notification profile call",
+            row_color="action",
+            details=build_notification_event_details(notify_name, original_kwargs),
+            summary=f"notify.{notify_name}",
+        )
+        self.hass.data[DOMAIN][ACTIVE_NOTIFY_LOG_EVENT_ID] = notify_event_id
 
         for key in [
+            "target",
             "entity_id",
+            "device_id",
+            "area_id",
+            "floor_id",
+            "label_id",
             "chime_path",
             "end_chime_path",
             "offset",
-            "crossafade",
+            "crossfade",
             "final_delay",
             "tts_platform",
             "tts_speed",
@@ -50,19 +119,38 @@ class ChimeTTSNotificationService(BaseNotificationService):
             "tld",
             "voice",
             "options",
-            "audio_conversion"
+            "audio_conversion",
+            "pre_script",
+            "post_script",
         ]:
-            kwargs[key] = data.get(key, self._config.get(key))
+            if key in target_keys and has_target_override:
+                kwargs[key] = data.get(key)
+            else:
+                kwargs[key] = data.get(key, self._config.get(key))
+
+        if kwargs.get("crossfade") in (None, ""):
+            kwargs["crossfade"] = data.get(
+                "crossafade",
+                self._config.get("crossafade"),
+            )
 
         helpers.debug_title("Chime TTS Notify")
         for key, value in kwargs.items():
             _LOGGER.debug(f" - {key} = '{value}'" if isinstance(value, str) else f" - {key} = {value}")
 
         try:
+            service_data = {
+                **kwargs,
+                INTERNAL_NOTIFY_ORIGIN: True,
+                INTERNAL_NOTIFY_LOG_EVENT_ID: notify_event_id,
+            }
             await self.hass.services.async_call(
                 domain=DOMAIN,
                 service=SERVICE_SAY,
-                service_data=kwargs,
+                service_data=service_data,
                 blocking=True)
         except Exception as error:
             _LOGGER.error("Service `chime_tts.say` error: %s", error)
+        finally:
+            self.hass.data[DOMAIN].pop(ACTIVE_NOTIFY_LOG_EVENT_ID, None)
+            finish_panel_log_event(self.hass, notify_event_id)

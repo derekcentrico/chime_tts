@@ -1,20 +1,34 @@
 """Helper class for generating TTS Audio in Chime TTS."""
+
 import asyncio
 import io
 from datetime import datetime
 from homeassistant.core import HomeAssistant
 from homeassistant.components import tts
+from homeassistant.components.persistent_notification import (
+    async_create as async_create_notification,
+)
+from homeassistant.helpers import issue_registry as ir
 from hass_nabucasa import voice as nabu_voices
 import logging
 from .filesystem import FilesystemHelper
 from .helpers import ChimeTTSHelper
 from ..const import (
+    DOMAIN,
     TTS_TIMEOUT_KEY,
     TTS_TIMEOUT_DEFAULT,
     QUEUE_TIMEOUT_KEY,
     QUEUE_TIMEOUT_DEFAULT,
     TTS_PLATFORM_KEY,
-     FALLBACK_TTS_PLATFORM_KEY,
+    FALLBACK_TTS_PLATFORM_KEY,
+    FALLBACK_TTS_CACHE_KEY,
+    FALLBACK_TTS_ISSUE_ID,
+    FALLBACK_TTS_NOTIFICATION_ID,
+    FALLBACK_TTS_REPORT_KEY,
+    FALLBACK_TTS_REPORT_DEFAULT,
+    FALLBACK_TTS_REPORT_WARNING,
+    FALLBACK_TTS_REPORT_NOTIFICATION,
+    FALLBACK_TTS_REPORT_REPAIR,
     AMAZON_POLLY,
     BAIDU,
     ELEVENLABS,
@@ -39,7 +53,9 @@ filesystem_helper = FilesystemHelper()
 _LOGGER = logging.getLogger(__name__)
 
 
-def _clamped_tts_timeout(tts_timeout: int, queue_timeout: int, has_pending_fallback: bool) -> int:
+def _clamped_tts_timeout(
+    tts_timeout: int, queue_timeout: int, has_pending_fallback: bool
+) -> int:
     """Cap the per-platform TTS timeout so a pending fallback fits in the queue window.
 
     The queue cancels the whole service call after queue_timeout. When a fallback
@@ -51,40 +67,211 @@ def _clamped_tts_timeout(tts_timeout: int, queue_timeout: int, has_pending_fallb
     max_timeout = max(1, (queue_timeout - 2) // 2)
     return min(tts_timeout, max_timeout)
 
+
 class TTSAudioHelper:
     """Helper class for generating TTS Audio in Chime TTS."""
 
     _data = {}
+    _last_error_message: str | None = None
+    # The resolved platform for the most recent request, and whether any
+    # request in the current service call used the configured fallback.
+    _last_tts_platform: str | None = None
+    _last_request_used_fallback: bool = False
+    _fallback_used_in_call: bool = False
 
-    async def async_request_tts_audio(self, hass: HomeAssistant, tts_platform: str, message: str, language: str, cache: bool, options: dict, is_fallback: bool = False):
+    async def async_request_tts_audio(
+        self,
+        hass: HomeAssistant,
+        tts_platform: str,
+        message: str,
+        language: str,
+        cache: bool,
+        options: dict,
+        is_fallback: bool = False,
+    ):
         """Send an API request for TTS audio and return the audio file's local filepath."""
+        self._last_error_message = None
+        if not is_fallback:
+            self._last_tts_platform = None
+            self._last_request_used_fallback = False
         start_time = datetime.now()
 
         # Step 1: Input validation and preparation
-        tts_platform, tts_options, language = self._prepare_tts_request(hass, tts_platform, message, language, options)
+        tts_platform, tts_options, language = self._prepare_tts_request(
+            hass,
+            tts_platform,
+            message,
+            language,
+            options,
+            allow_configured_fallbacks=not is_fallback,
+        )
         if not tts_platform:
             return None
 
-        # Step 2: Generate TTS audio
-        media_source_id, audio_data = await self._generate_tts_audio(
-            hass, tts_platform, message, language, cache, tts_options, is_fallback
-        )
+        # Adapt the message to the resolved platform
+        platform_message = self._adapt_message_to_platform(message, tts_platform)
 
-        # Step 3: Process the audio data
-        audio = await self._process_audio_data(hass, media_source_id, audio_data, start_time)
+        # Steps 2-3: Generate and retrieve TTS audio under one deadline. A
+        # media-source ID can be produced before the provider makes its network
+        # request, so timing only generation can prevent a fallback attempt.
+        timeout = self._tts_attempt_timeout(is_fallback)
+        try:
+            audio = await asyncio.wait_for(
+                self._async_generate_and_process_audio(
+                    hass,
+                    tts_platform,
+                    platform_message,
+                    language,
+                    cache,
+                    tts_options,
+                    is_fallback,
+                    start_time,
+                    timeout,
+                ),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            self._last_error_message = (
+                f"TTS audio request with {tts_platform} timed out after {timeout}s."
+            )
+            _LOGGER.error(self._last_error_message)
+            audio = None
         if audio:
+            # The requested platform worked: clear any repair issue a previous
+            # fallback raised. Guarded on is_fallback so the fallback's own
+            # success does not immediately clear the issue just raised for it.
+            if not is_fallback:
+                ir.async_delete_issue(hass, DOMAIN, FALLBACK_TTS_ISSUE_ID)
+            self._last_tts_platform = tts_platform
             return audio
 
-        # Step 4: Retry with fallback platform if needed
-        return await self._retry_with_fallback(hass, tts_platform, message, language, cache, options)
+        # Step 4: Retry with fallback platform if needed. The original message is
+        # passed on, so it is re-adapted for the fallback platform.
+        return await self._retry_with_fallback(
+            hass, tts_platform, message, language, cache, options
+        )
 
-    def _prepare_tts_request(self, hass: HomeAssistant, tts_platform, message, language, options):
+    def _adapt_message_to_platform(self, message: str, tts_platform: str):
+        """Remove any text the resolved TTS platform cannot pronounce."""
+        if helpers.supports_niqqud(tts_platform):
+            return message
+
+        cleaned_message = helpers.remove_niqqud(message)
+        if cleaned_message != message:
+            _LOGGER.debug(
+                " - Removed Hebrew niqqud: '%s' is not known to support it",
+                tts_platform,
+            )
+        return cleaned_message
+
+    @property
+    def last_error_message(self) -> str | None:
+        """Return the most recent TTS generation error message, if any."""
+        return self._last_error_message
+
+    def reset_fallback_tracking(self) -> None:
+        """Clear fallback tracking at the start of a service call."""
+        self._last_tts_platform = None
+        self._last_request_used_fallback = False
+        self._fallback_used_in_call = False
+
+    @property
+    def last_tts_platform(self) -> str | None:
+        """Return the provider that generated the most recent audio."""
+        return self._last_tts_platform
+
+    @property
+    def fallback_used_in_call(self) -> bool:
+        """Return whether the configured fallback was used in this service call."""
+        return self._fallback_used_in_call
+
+    @property
+    def last_request_used_fallback(self) -> bool:
+        """Return whether the most recent request used the configured fallback."""
+        return self._last_request_used_fallback
+
+    @property
+    def cache_fallback_audio(self) -> bool:
+        """Return whether audio produced by the fallback platform may be cached."""
+        return bool(self._data.get(FALLBACK_TTS_CACHE_KEY, False))
+
+    @property
+    def may_cache_request_audio(self) -> bool:
+        """Return whether audio from the most recent request may be cached."""
+        return self.cache_fallback_audio or not self._last_request_used_fallback
+
+    @property
+    def may_cache_call_audio(self) -> bool:
+        """Return whether the current service call's combined audio may be cached."""
+        return self.cache_fallback_audio or not self._fallback_used_in_call
+
+    def _tts_attempt_timeout(self, is_fallback: bool) -> int:
+        """Return the total time budget for one TTS platform attempt."""
+        timeout = int(self._data.get(TTS_TIMEOUT_KEY, TTS_TIMEOUT_DEFAULT))
+        queue_timeout = int(self._data.get(QUEUE_TIMEOUT_KEY, QUEUE_TIMEOUT_DEFAULT))
+        has_pending_fallback = (
+            bool(self._data.get(FALLBACK_TTS_PLATFORM_KEY)) and not is_fallback
+        )
+        clamped = _clamped_tts_timeout(timeout, queue_timeout, has_pending_fallback)
+        if clamped != timeout:
+            _LOGGER.debug(
+                "Clamping TTS attempt timeout from %ss to %ss so a fallback fits within the %ss queue timeout",
+                timeout,
+                clamped,
+                queue_timeout,
+            )
+        return clamped
+
+    async def _async_generate_and_process_audio(
+        self,
+        hass: HomeAssistant,
+        tts_platform: str,
+        message: str,
+        language: str | None,
+        cache: bool,
+        tts_options: dict | None,
+        is_fallback: bool,
+        start_time: datetime,
+        timeout: int,
+    ):
+        """Generate a media source and retrieve its audio for one platform."""
+        media_source_id, audio_data = await self._generate_tts_audio(
+            hass,
+            tts_platform,
+            message,
+            language,
+            cache,
+            tts_options,
+            is_fallback,
+            timeout,
+        )
+        return await self._process_audio_data(
+            hass,
+            tts_platform,
+            message,
+            language,
+            tts_options,
+            media_source_id,
+            audio_data,
+            start_time,
+        )
+
+    def _prepare_tts_request(
+        self,
+        hass: HomeAssistant,
+        tts_platform,
+        message,
+        language,
+        options,
+        allow_configured_fallbacks: bool = True,
+    ):
         if not options:
             options = {}
         tts_options = options.copy()
 
         if not message:
-            _LOGGER.warning("No message text provided for TTS audio")
+            self._last_error_message = "No message text provided for TTS audio."
+            _LOGGER.warning(self._last_error_message)
             return None, None, None
 
         tts_platform = helpers.get_tts_platform(
@@ -92,6 +279,7 @@ class TTSAudioHelper:
             tts_platform=tts_platform,
             default_tts_platform=self._data[TTS_PLATFORM_KEY],
             fallback_tts_platform=self._data[FALLBACK_TTS_PLATFORM_KEY],
+            allow_configured_fallbacks=allow_configured_fallbacks,
         )
         if not tts_platform:
             return None, None, None
@@ -100,11 +288,16 @@ class TTSAudioHelper:
         return tts_platform, tts_options, language
 
     def _adjust_language_and_voice(self, tts_platform, language, tts_options):
+        original_language = language
+        preserve_original_language = True
         voice = tts_options.get("voice", None)
         # Nabu Casa cloud can arrive as a full entity id (tts.home_assistant_cloud)
         # now that platform matching keeps entity ids; map it to the constant so
         # the language handling below still applies.
-        if tts_platform and tts_platform.lower() in ("tts.home_assistant_cloud", "tts.cloud"):
+        if tts_platform and tts_platform.lower() in (
+            "tts.home_assistant_cloud",
+            "tts.cloud",
+        ):
             tts_platform = NABU_CASA_CLOUD_TTS
         language_aware_platforms = [
             AMAZON_POLLY,
@@ -115,12 +308,15 @@ class TTSAudioHelper:
             MICROSOFT_EDGE_TTS,
             MICROSOFT_TTS,
         ]
-        if (language or tts_options.get("language")) and tts_platform in language_aware_platforms:
+        if (
+            language or tts_options.get("language")
+        ) and tts_platform in language_aware_platforms:
             if not language:
                 language = tts_options.get("language")
             if tts_platform == IBM_WATSON_TTS and voice is None:
                 tts_options["voice"] = language
                 language = None
+                preserve_original_language = False
             elif tts_platform == MICROSOFT_TTS:
                 tts_options.pop("language", None)
                 if voice:
@@ -131,10 +327,12 @@ class TTSAudioHelper:
                 # the options makes the engine reject the call with
                 # "Invalid options found: ['language']" (#242, #210).
                 tts_options.pop("language", None)
-        else:
-            language = None
-
-        if tts_platform == NABU_CASA_CLOUD_TTS and isinstance(voice, str) and voice and not language:
+        if (
+            tts_platform == NABU_CASA_CLOUD_TTS
+            and isinstance(voice, str)
+            and voice
+            and not language
+        ):
             # Styled cloud voices arrive as "name||style"; match on the base name
             # so the style suffix does not break the language lookup (#307).
             base_voice = voice.split("||")[0]
@@ -146,70 +344,124 @@ class TTSAudioHelper:
                         language,
                         voice,
                     )
-        return language
+        if language:
+            return language
+        if preserve_original_language and original_language:
+            return original_language
+        return None
 
-    @staticmethod
-    def _resolve_engine_id(hass: HomeAssistant, tts_platform):
-        """Return the engine id to hand to generate_media_source_id.
+    async def _generate_tts_audio(
+        self,
+        hass: HomeAssistant,
+        tts_platform: str,
+        message: str,
+        language: str | None,
+        cache: bool,
+        tts_options: dict | None,
+        is_fallback: bool = False,
+        timeout: int | None = None,
+    ) -> tuple[str | None, bytes | None]:
+        media_source_id: str | None = None
+        audio_data: bytes | None = None
+        engine_candidates = self._engine_candidates(hass, tts_platform)
 
-        A bare provider name is promoted to its ``tts.*`` entity id only when
-        that entity exists. Some providers (notably Nabu Casa "cloud") resolve
-        only by their legacy provider name and expose a differently named entity
-        (``tts.home_assistant_cloud``), so blindly prefixing would yield a
-        non-existent ``tts.cloud`` engine that fails with "Invalid TTS provider
-        selected". In that case the legacy name is kept, which HA still resolves.
-        """
-        if (
-            tts_platform
-            and not tts_platform.startswith("tts.")
-            and hass.states.get(f"tts.{tts_platform}") is not None
-        ):
-            return f"tts.{tts_platform}"
-        return tts_platform
-
-    async def _generate_tts_audio(self, hass: HomeAssistant, tts_platform, message, language, cache, tts_options, is_fallback: bool = False):
-        media_source_id = None
-        audio_data = None
-        tts_platform = self._resolve_engine_id(hass, tts_platform)
+        timeout = (
+            timeout if timeout is not None else self._tts_attempt_timeout(is_fallback)
+        )
         try:
-            timeout = int(self._data.get(TTS_TIMEOUT_KEY, TTS_TIMEOUT_DEFAULT))
-            queue_timeout = int(self._data.get(QUEUE_TIMEOUT_KEY, QUEUE_TIMEOUT_DEFAULT))
-            # Only reserve room for a fallback when one is configured and this is
-            # not already the fallback attempt.
-            has_pending_fallback = bool(self._data.get(FALLBACK_TTS_PLATFORM_KEY)) and not is_fallback
-            clamped = _clamped_tts_timeout(timeout, queue_timeout, has_pending_fallback)
-            if clamped != timeout:
-                _LOGGER.debug(
-                    "Clamping TTS generation timeout from %ss to %ss so a fallback fits within the %ss queue timeout",
-                    timeout,
-                    clamped,
-                    queue_timeout,
-                )
-                timeout = clamped
-            media_source_id = await asyncio.wait_for(
-                asyncio.to_thread(
-                    tts.media_source.generate_media_source_id,
-                    hass=hass,
-                    message=message,
-                    engine=tts_platform,
-                    language=language,
-                    cache=cache,
-                    options=tts_options,
-                ),
-                timeout=timeout,
+            last_error: Exception | None = None
+            last_engine = engine_candidates[0]
+            for engine in engine_candidates:
+                last_engine = engine
+                try:
+                    # generate_media_source_id is sync; offload to thread, guard with timeout
+                    media_source_id = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            tts.media_source.generate_media_source_id,
+                            hass=hass,
+                            message=message,
+                            engine=engine,
+                            language=language,
+                            cache=cache,
+                            options=tts_options,
+                        ),
+                        timeout=timeout,
+                    )
+                    return media_source_id, audio_data
+                except Exception as exc:  # noqa: PERF203
+                    last_error = exc
+                    if len(engine_candidates) > 1:
+                        _LOGGER.debug(
+                            "TTS audio generation with %s failed, trying next engine candidate: %s",
+                            engine,
+                            exc,
+                        )
+
+            if last_error is not None:
+                self._handle_generation_error(last_error, last_engine, media_source_id)
+            return None, None
+
+        except TimeoutError:
+            _LOGGER.error(
+                "TTS audio generation with %s timed out after %ss. "
+                "Consider increasing the TTS timeout in the configuration.",
+                engine_candidates[0],
+                timeout,
             )
-        except asyncio.TimeoutError:
-            _LOGGER.error("TTS audio generation with %s timed out after %ss. Consider increasing the TTS audio generation timeout value in the configuration.", tts_platform, str(timeout))
+            return None, None
+
         except asyncio.CancelledError:
-            _LOGGER.error("TTS audio generation with %s cancelled.", tts_platform)
-        except Exception as error:
-            _LOGGER.error("Error generating TTS audio with %s.", tts_platform)
-            self._handle_generation_error(error, tts_platform, media_source_id)
+            _LOGGER.warning(
+                "TTS audio generation with %s cancelled.", engine_candidates[0]
+            )
+            raise  # preserve cancellation
 
-        return media_source_id, audio_data
+        except Exception as exc:
+            self._handle_generation_error(exc, engine_candidates[0], media_source_id)
+            return None, None
 
-    async def _process_audio_data(self, hass: HomeAssistant, media_source_id, audio_data, start_time):
+    def _engine_candidates(self, hass: HomeAssistant, tts_platform: str) -> list[str]:
+        """Return likely engine ids for modern entity and legacy provider paths."""
+        hass_data = getattr(hass, "data", {}) or {}
+        manager = hass_data.get("tts_manager")
+        legacy_providers = set(getattr(manager, "providers", {})) if manager else set()
+        candidates: list[str] = []
+
+        def add_candidate(candidate: str) -> None:
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        if tts_platform.startswith("tts."):
+            bare_platform = tts_platform[4:]
+            add_candidate(tts_platform)
+            if bare_platform in legacy_providers:
+                add_candidate(bare_platform)
+        else:
+            if tts_platform in legacy_providers:
+                add_candidate(tts_platform)
+            add_candidate(f"tts.{tts_platform}")
+
+        return candidates
+
+    async def _process_audio_data(
+        self,
+        hass: HomeAssistant,
+        tts_platform: str,
+        message: str,
+        language: str | None,
+        tts_options: dict | None,
+        media_source_id,
+        audio_data,
+        start_time,
+    ):
+        direct_audio_data = await self._get_direct_tts_audio(
+            hass, tts_platform, message, language, tts_options
+        )
+        if direct_audio_data is not None and len(direct_audio_data) == 2:
+            return await self._extract_audio(direct_audio_data, start_time)
+
         if not media_source_id:
+            self._last_error_message = "Unable to generate a Home Assistant media source id for the TTS request."
             _LOGGER.error("Error: Unable to generate media_source_id")
             return None
 
@@ -218,6 +470,7 @@ class TTSAudioHelper:
                 hass=hass, media_source_id=media_source_id
             )
         except Exception as error:
+            self._last_error_message = f"Home Assistant could not retrieve audio for media source '{media_source_id}': {error}"
             _LOGGER.error(
                 "   - Error calling tts.async_get_media_source_audio with media_source_id = '%s': %s",
                 str(media_source_id),
@@ -229,10 +482,92 @@ class TTSAudioHelper:
 
         return None
 
+    async def _get_direct_tts_audio(
+        self,
+        hass: HomeAssistant,
+        tts_platform: str,
+        message: str,
+        language: str | None,
+        tts_options: dict | None,
+    ) -> tuple[str, bytes] | None:
+        """Fetch TTS audio directly from the resolved engine when possible."""
+        # Keep this resolution in sync with media-source generation. A configured
+        # ``tts.<entity>`` may correspond to a legacy provider registered under
+        # its bare name (and vice versa).
+        for engine in self._engine_candidates(hass, tts_platform):
+            engine_instance = self._get_engine_instance(hass, engine)
+            if engine_instance is None:
+                continue
+
+            processed_language, processed_options = self._process_engine_options(
+                hass, engine_instance, language, tts_options
+            )
+            if processed_language is None or processed_options is None:
+                continue
+
+            for method_name in (
+                "async_internal_get_tts_audio",
+                "internal_async_get_tts_audio",
+                "async_get_tts_audio",
+            ):
+                method = getattr(engine_instance, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    audio_data = await method(
+                        message, processed_language, processed_options
+                    )
+                except Exception as error:
+                    _LOGGER.debug(
+                        "Direct TTS audio request with %s via %s failed; falling back to media source retrieval: %s",
+                        engine,
+                        method_name,
+                        error,
+                    )
+                    break
+                if audio_data is not None and len(audio_data) == 2:
+                    return audio_data
+                break
+        return None
+
+    def _process_engine_options(
+        self,
+        hass: HomeAssistant,
+        engine_instance,
+        language: str | None,
+        tts_options: dict | None,
+    ) -> tuple[str | None, dict | None]:
+        """Run Home Assistant's TTS option validation when available."""
+        manager = getattr(hass, "data", {}).get("tts_manager")
+        if manager is None or not hasattr(manager, "process_options"):
+            return language, dict(tts_options or {})
+        try:
+            return manager.process_options(
+                engine_instance,
+                language,
+                dict(tts_options or {}),
+            )
+        except Exception as error:
+            _LOGGER.debug("Direct TTS option processing failed: %s", error)
+            return None, None
+
+    def _get_engine_instance(self, hass: HomeAssistant, tts_platform: str):
+        """Resolve a Home Assistant TTS engine instance across HA versions."""
+        try:
+            from homeassistant.components.tts.helper import get_engine_instance
+
+            return get_engine_instance(hass, tts_platform)
+        except Exception as error:
+            _LOGGER.debug(
+                "Unable to resolve TTS engine instance for %s: %s", tts_platform, error
+            )
+            return None
+
     async def _extract_audio(self, audio_data, start_time):
         audio_bytes = audio_data[1]
         file = io.BytesIO(audio_bytes)
         if not file:
+            self._last_error_message = "Home Assistant returned TTS bytes, but they could not be converted into an audio stream."
             _LOGGER.error("...could not convert TTS bytes to audio")
             return None
 
@@ -241,36 +576,88 @@ class TTSAudioHelper:
             end_time = datetime.now()
             completion_time = round((end_time - start_time).total_seconds(), 2)
             completion_time_string = (
-                f"{completion_time}s" if completion_time >= 1 else f"{completion_time * 1000}ms"
+                f"{completion_time}s"
+                if completion_time >= 1
+                else f"{completion_time * 1000}ms"
             )
             _LOGGER.debug("   ...TTS audio generated in %s", completion_time_string)
             return audio
 
+        self._last_error_message = "Home Assistant returned TTS audio, but Chime TTS could not decode it into a playable audio segment."
         _LOGGER.error("...could not extract TTS audio from file")
         return None
 
-    async def _retry_with_fallback(self, hass: HomeAssistant, tts_platform, message, language, cache, options):
+    async def _retry_with_fallback(
+        self, hass: HomeAssistant, tts_platform, message, language, cache, options
+    ):
         fallback_platform = self._data.get(FALLBACK_TTS_PLATFORM_KEY)
         if tts_platform != fallback_platform and fallback_platform:
-            _LOGGER.debug(
-                "Retrying TTS audio generation with fallback platform '%s'", fallback_platform
-            )
+            self._last_request_used_fallback = True
+            self._fallback_used_in_call = True
+            # Keep fallback audio out of Home Assistant's TTS cache unless the
+            # fallback-cache setting explicitly permits it.
+            fallback_cache = cache and self.cache_fallback_audio
+            self._report_fallback_used(hass, tts_platform, fallback_platform)
             return await self.async_request_tts_audio(
                 hass=hass,
                 tts_platform=fallback_platform,
                 message=message,
                 language=language,
-                cache=cache,
+                cache=fallback_cache,
                 options=options,
                 is_fallback=True,
             )
+        self._last_error_message = (
+            self._last_error_message or "TTS audio generation failed."
+        )
         _LOGGER.error("...audio_data generation failed")
         return None
 
+    def _report_fallback_used(
+        self, hass: HomeAssistant, primary_platform, fallback_platform
+    ):
+        """Surface use of the fallback TTS platform via the configured report mode."""
+        message = (
+            f"Retrying TTS audio generation with fallback platform '{fallback_platform}' "
+            f"(requested platform '{primary_platform}' failed)"
+        )
+        report_mode = self._data.get(
+            FALLBACK_TTS_REPORT_KEY, FALLBACK_TTS_REPORT_DEFAULT
+        )
+
+        if report_mode == FALLBACK_TTS_REPORT_WARNING:
+            _LOGGER.warning(message)
+            return
+
+        _LOGGER.debug(message)
+
+        if report_mode == FALLBACK_TTS_REPORT_NOTIFICATION:
+            async_create_notification(
+                hass,
+                message,
+                title="Chime TTS: fallback platform in use",
+                notification_id=FALLBACK_TTS_NOTIFICATION_ID,
+            )
+        elif report_mode == FALLBACK_TTS_REPORT_REPAIR:
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                FALLBACK_TTS_ISSUE_ID,
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key=FALLBACK_TTS_ISSUE_ID,
+                translation_placeholders={
+                    "primary_platform": primary_platform,
+                    "fallback_platform": fallback_platform,
+                },
+            )
+
     def _handle_generation_error(self, error, tts_platform, media_source_id):
         if str(error) == "Invalid TTS provider selected":
+            self._last_error_message = f"The selected TTS provider '{tts_platform}' is not currently available in Home Assistant."
             missing_tts_platform_error(tts_platform)
         else:
+            self._last_error_message = f"Home Assistant failed to generate TTS audio with provider '{tts_platform}': {error}"
             _LOGGER.error(
                 "   - Error calling tts.media_source.generate_media_source_id: %s",
                 error,
@@ -280,31 +667,47 @@ class TTSAudioHelper:
 def missing_tts_platform_error(tts_platform):
     """Write a TTS platform specific debug warning when the TTS platform has not been configured."""
     tts_platform_name = tts_platform
-    tts_platform_documentation = "https://www.home-assistant.io/integrations/#text-to-speech"
+    tts_platform_documentation = (
+        "https://www.home-assistant.io/integrations/#text-to-speech"
+    )
     if tts_platform is AMAZON_POLLY:
         tts_platform_name = "Amazon Polly"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/amazon_polly"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/amazon_polly"
+        )
     if tts_platform is BAIDU:
         tts_platform_name = "Baidu"
         tts_platform_documentation = "https://www.home-assistant.io/integrations/baidu"
     if tts_platform is ELEVENLABS:
         tts_platform_name = "ElevenLabsTS"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/elevenlabs"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/elevenlabs"
+        )
     if tts_platform is GOOGLE_CLOUD:
         tts_platform_name = "Google Cloud"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/google_cloud"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/google_cloud"
+        )
     if tts_platform is GOOGLE_TRANSLATE:
         tts_platform_name = "Google Translate"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/google_translate"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/google_translate"
+        )
     if tts_platform is IBM_WATSON_TTS:
         tts_platform_name = "Watson TTS"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/watson_tts"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/watson_tts"
+        )
     if tts_platform is MARYTTS:
         tts_platform_name = "MaryTTS"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/marytts"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/marytts"
+        )
     if tts_platform is MICROSOFT_TTS:
         tts_platform_name = "Microsoft TTS"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/microsoft"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/microsoft"
+        )
     if tts_platform is MICROSOFT_EDGE_TTS:
         tts_platform_name = "Microsoft Edge TTS"
         tts_platform_documentation = "https://github.com/hasscc/hass-edge-tts"
@@ -316,18 +719,24 @@ def missing_tts_platform_error(tts_platform):
         tts_platform_documentation = "https://github.com/sfortis/openai_tts"
     if tts_platform is PICOTTS:
         tts_platform_name = "PicoTTS"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/picotts"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/picotts"
+        )
     if tts_platform is PIPER:
         tts_platform_name = "Piper"
         tts_platform_documentation = "https://www.home-assistant.io/integrations/piper"
     if tts_platform is VOICE_RSS:
         tts_platform_name = "VoiceRSS"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/voicerss"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/voicerss"
+        )
     if tts_platform is YANDEX_TTS:
         tts_platform_name = "Yandex TTS"
-        tts_platform_documentation = "https://www.home-assistant.io/integrations/yandextts"
+        tts_platform_documentation = (
+            "https://www.home-assistant.io/integrations/yandextts"
+        )
     _LOGGER.error(
         "The %s platform was not found. Please check that it has been configured correctly: %s",
         tts_platform_name,
-        tts_platform_documentation
+        tts_platform_documentation,
     )

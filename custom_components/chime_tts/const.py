@@ -28,11 +28,13 @@ SERVICE_SAY_URL = "say_url"
 OFFSET_KEY = "offset"
 DEFAULT_OFFSET_MS = 450
 CROSSFADE_KEY = "crossfade"
+INITIAL_DELAY_KEY = "initial_delay"
 
 DATA_STORAGE_KEY = "chime_tts_integration_data"
 AUDIO_PATH_KEY = "audio_path" # <-- Deprecated
 LOCAL_PATH_KEY = "local_path"
 PUBLIC_PATH_KEY = "public_path"
+SONOS_WWW_PATH_KEY = "sonos_www_path"
 AUDIO_DURATION_KEY = "audio_duration"
 
 FADE_TRANSITION_KEY = "fade_transition_key"
@@ -42,26 +44,8 @@ TRANSITION_STEP_MS = 150
 ADD_COVER_ART_KEY = "add_cover_art"
 
 ALEXA_MEDIA_PLAYER_PLATFORM = "alexa_media"
-CAST_PLATFORM = "cast"
 SONOS_PLATFORM = "sonos"
 SPOTIFY_PLATFORM = "spotify"
-SQUEEZEBOX_PLATFORM = "squeezebox"
-
-# Google Cast receivers drop the first second or two of audio while the
-# default media receiver app spins up a new playback context, so a short
-# chime or the start of TTS gets clipped. Prepend this much leading silence
-# when Cast players are targeted; overridable per call via the `cast_delay`
-# field (set to 0 to disable).
-DEFAULT_CAST_DELAY_MS = 2000
-
-# Some Sonos models drop the play_media request when it arrives in the same
-# instant as the preceding volume_set. Wait this long after the volume_set
-# before issuing play_media so the speaker settles.
-SONOS_VOLUME_SETTLE_MS = 200
-
-# audio_dict key holding the unauthenticated www URL Sonos plays instead of the
-# signed media-source URL (home-assistant/core#88714).
-SONOS_PUBLIC_URL_KEY = "sonos_public_url"
 
 ROOT_PATH_KEY = "root_path_key"
 MEDIA_FOLDER_PATH = "/local/"
@@ -80,6 +64,7 @@ WWW_PATH_DEFAULT = "/config/www/chime_tts/"
 MP3_PRESET_PATH = "custom_components/chime_tts/mp3s/"
 MP3_PRESET_PATH_PLACEHOLDER = "mp3_path_placeholder-"  # DEPRECATED
 DEFAULT_CHIME_OPTIONS = [
+    {"label": "Airport", "value": "airport"},
     {"label": "Ba-Dum Tss!", "value": "ba_dum_tss"},
     {"label": "Bells", "value": "bells"},
     {"label": "Bells 2", "value": "bells_2"},
@@ -90,6 +75,7 @@ DEFAULT_CHIME_OPTIONS = [
     {"label": "Classical", "value": "classical"},
     {"label": "Crickets", "value": "crickets"},
     {"label": "Ding Dong", "value": "ding_dong"},
+    {"label": "Doorbell", "value": "doorbell"},
     {"label": "Drum Roll", "value": "drumroll"},
     {"label": "Dun dun DUUUN!", "value": "dun_dun_dun"},
     {"label": "Error", "value": "error"},
@@ -109,6 +95,36 @@ DEFAULT_CHIME_OPTIONS = [
 ]
 MP3_PRESET_CUSTOM_PREFIX = "custom_chime_path_"
 MP3_PRESET_CUSTOM_KEY = "custom_paths"
+CHIME_SETS_KEY = "chime_sets"
+CHIME_OFFSETS_KEY = "chime_offsets"
+# Default start offsets tuned against the bundled Chime TTS audio files.  Chimes
+# not listed here continue to use the integration-wide default offset.
+DEFAULT_CHIME_OFFSETS = {
+    "airport": -540,
+    "ba_dum_tss": -1100,
+    "bells": 0,
+    "bells_2": -250,
+    "bright": 0,
+    "chirp": 0,
+    "choir": -1070,
+    "chord": 0,
+    "classical": -610,
+    "crickets": 0,
+    "ding_dong": -330,
+    "doorbell": -1720,
+    "drumroll": 0,
+    "dun_dun_dun": -590,
+    "error": -410,
+    "glockenspiel": -310,
+    "hail": 0,
+    "sad_trombone": -500,
+    "soft": -2300,
+    "tada": 0,
+    "toast": -420,
+    "twenty_four": -530,
+    "whistle": 0,
+}
+CHIME_SET_PREFIX = "chime_set:"
 QUEUE = "QUEUE"
 QUEUE_STATUS_KEY = "QUEUE_STATUS"
 QUEUE_RUNNING = "QUEUE_RUNNING"
@@ -125,9 +141,32 @@ QUEUE_PROCESSOR_SLEEP_TIME = 0.2
 
 TTS_PLATFORM_KEY = "tts_platform_key"
 FALLBACK_TTS_PLATFORM_KEY = "fallback_tts_platform_key"
+FALLBACK_TTS_CACHE_KEY = "fallback_tts_cache_key"
+FALLBACK_TTS_REPORT_KEY = "fallback_tts_report_key"
+FALLBACK_TTS_REPORT_DEBUG = "debug"
+FALLBACK_TTS_REPORT_WARNING = "warning"
+FALLBACK_TTS_REPORT_NOTIFICATION = "notification"
+FALLBACK_TTS_REPORT_REPAIR = "repair"
+FALLBACK_TTS_REPORT_DEFAULT = FALLBACK_TTS_REPORT_DEBUG
+FALLBACK_TTS_REPORT_OPTIONS = [
+    FALLBACK_TTS_REPORT_DEBUG,
+    FALLBACK_TTS_REPORT_WARNING,
+    FALLBACK_TTS_REPORT_NOTIFICATION,
+    FALLBACK_TTS_REPORT_REPAIR,
+]
+FALLBACK_TTS_ISSUE_ID = "fallback_tts_in_use"
+FALLBACK_TTS_NOTIFICATION_ID = "chime_tts_fallback_in_use"
 DEFAULT_LANGUAGE_KEY = "default_language_key"
 DEFAULT_VOICE_KEY = "default_voice_key"
 DEFAULT_TLD_KEY = "default_tld_key"
+DEFAULT_PRE_SCRIPT_KEY = "default_pre_script_key"
+DEFAULT_POST_SCRIPT_KEY = "default_post_script_key"
+# Deprecated shared setting retained only to migrate existing configurations.
+DEFAULT_SCRIPTS_SHARED_KEY = "default_scripts_shared_key"
+DEFAULT_PRE_SCRIPT_SHARED_KEY = "default_pre_script_shared_key"
+DEFAULT_POST_SCRIPT_SHARED_KEY = "default_post_script_shared_key"
+DEFAULT_PRE_SCRIPT_SAY_URL_KEY = "default_pre_script_say_url_key"
+DEFAULT_POST_SCRIPT_SAY_URL_KEY = "default_post_script_say_url_key"
 
 # FFmpeg Arguments
 FFMPEG_ARGS_ALEXA = "-y -ac 2 -codec:a libmp3lame -b:a 48k -ar 24000 -write_xing 0"
@@ -151,6 +190,7 @@ PIPER = "tts.piper"
 VOICE_RSS = "voicerss"
 YANDEX_TTS = "yandextts"
 
-QUOTE_CHAR_SUBSTITUTE = "🁢"
+# Platforms verified to pronounce Hebrew niqqud. Any other platform has it stripped.
+NIQQUD_SUPPORTED_TTS_PLATFORMS = [GOOGLE_TRANSLATE]
 
-SQUEEZEBOX_ATTR_ANNOUNCE_VOLUME = "announce_volume"
+QUOTE_CHAR_SUBSTITUTE = "🁢"

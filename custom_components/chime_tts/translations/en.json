@@ -32,7 +32,7 @@
         },
         "replay": {
             "name": "Replay",
-            "description": "Repeat the last service call to chime_tts.say with the same parameters"
+            "description": "Repeat the last action call to chime_tts.say with the same parameters"
         },
         "say": {
             "name": "Say",
@@ -49,6 +49,10 @@
                 "offset": {
                     "name": "Offset",
                     "description": "Adds a delay between audio segments when value > 0, or overlays audio segments when value < 0."
+                },
+                "initial_delay": {
+                    "name": "Initial Delay",
+                    "description": "Initial delay (in milliseconds) added to the start of the audio"
                 },
                 "final_delay": {
                     "name": "Final Delay",
@@ -119,7 +123,7 @@
         },
         "say_url": {
             "name": "Say URL",
-            "description": "Generates an audio file with the `chime_tts.say` service and returns either an external URL or a local file path, depending on the folder set in the configuration",
+            "description": "Generates an audio file with the `chime_tts.say` action and returns either an external URL or a local file path, depending on the folder set in the configuration",
             "fields": {
                 "chime_path": {
                     "name": "Chime Path",
@@ -132,6 +136,10 @@
                 "offset": {
                     "name": "Offset",
                     "description": "Adds a delay between audio segments when value > 0, or overlays audio segments when value < 0."
+                },
+                "initial_delay": {
+                    "name": "Initial Delay",
+                    "description": "Initial delay (in milliseconds) added to the start of the audio"
                 },
                 "final_delay": {
                     "name": "Final Delay",
@@ -190,6 +198,7 @@
         },
         "chime_paths": {
             "options": {
+                "airport": "Airport",
                 "ba_dum_tss": "Ba-Dum Tss!",
                 "bells": "Bells",
                 "bells_2": "Bells 2",
@@ -200,6 +209,7 @@
                 "classical": "Classical",
                 "crickets": "Crickets",
                 "ding_dong": "Ding Dong",
+                "doorbell": "Doorbell",
                 "drumroll": "Drum Roll",
                 "dun_dun_dun": "Dun dun DUUUN!",
                 "error": "Error",
@@ -219,20 +229,68 @@
             }
         }
     },
+    "config_panel": {
+        "loading": {
+            "settings": "Loading Chime TTS settings",
+            "profiles": "Loading notification profiles...",
+            "logs": "Loading Chime TTS log events...",
+            "items": "Loading items..."
+        },
+        "chapter": {
+            "settings": "Settings",
+            "configuration": "Configuration",
+            "configuration_description": "Set default providers, playback options, folder paths, and integration-wide behavior for Chime TTS.",
+            "profiles": "Profiles",
+            "session": "Session",
+            "project": "Project"
+        },
+        "section": {
+            "notify_profiles_title": "Notification Profiles",
+            "notify_profiles_description": "Create custom chime services to easily send Chime TTS notifications in automations and scripts.",
+            "logs_title": "Logs",
+            "logs_description": "Review Chime TTS events captured during this Home Assistant session, including actions, generated media, and raw log output.",
+            "about_title": "Support & Info",
+            "about_description": "Find documentation, support, bug reporting, feature request, and project support links for Chime TTS."
+        },
+        "action": {
+            "reload": "Reload", "reset": "Reset", "reset_section": "Reset Section", "save": "Save", "restart": "Restart", "restart_home_assistant": "Restart Home Assistant", "cancel": "Cancel", "discard": "Discard", "close": "Close", "open": "Open", "browse": "Browse", "use_anyway": "Use Anyway", "expand": "Expand", "collapse": "Collapse", "expand_all": "Expand All", "collapse_all": "Collapse All", "show_advanced": "Show Advanced", "hide_advanced": "Hide Advanced", "add_profile": "+ Add Profile", "raw_logs": "Raw Logs", "copy_logs": "Copy Logs", "copy_yaml": "Copy YAML", "repeat": "Repeat", "send": "Send", "test": "Test", "delete": "Delete", "rename": "Rename", "refresh": "Refresh", "new_folder": "New Folder", "upload": "Upload", "upload_files": "Upload Files", "upload_folder": "Upload Folder", "create_folder": "Create Folder", "overwrite_existing": "Overwrite Existing", "upload_non_existing": "Upload {count} Non-Existing", "select_folder": "Select folder", "play_preview": "Play preview", "pause_preview": "Pause preview", "loading_preview": "Loading preview"
+        },
+        "aria": {
+            "collapse_section": "Collapse section", "expand_section": "Expand section", "collapse_named": "Collapse {title}", "expand_named": "Expand {title}", "collapse_profile": "Collapse profile", "expand_profile": "Expand profile", "open_help": "Open help for {title}", "open_raw_logs": "Open the raw Home Assistant logs filtered to Chime TTS", "play_logo_animation": "Play Chime TTS logo animation", "logo": "Chime TTS logo", "collapse_log": "Collapse log row", "expand_log": "Expand log row", "close_test": "Close test input", "test_profile": "Test profile", "delete_profile": "Delete profile", "close_folder_browser": "Close folder browser", "more_actions": "More actions", "open_named": "Open {title}", "pause_named": "Pause {title}", "play_named": "Play {title}", "rename_named": "Rename {title}", "delete_named": "Delete {title}", "close_overwrite": "Close overwrite dialog", "confirm_restart": "Confirm Home Assistant restart", "unsaved_changes": "Unsaved changes"
+        },
+        "label": {
+            "required": "Required", "enabled": "Enabled", "debug_logs": "Enable debug logging", "target_media_players": "Target media players", "locations": "Locations", "current_folder": "Current folder", "version": "Version {version}", "profile": "Profile {number}", "log_event": "Log event", "audio_file": "audio file", "item": "item", "this_item": "this item", "selected_folder": "selected folder", "new_name": "New name", "folder_name": "Folder name", "add_media_player": "Add media player"
+        },
+        "placeholder": {"service_name": "Service name", "tts_text": "Enter TTS text", "search_folder": "Search current folder", "new_folder_name": "New folder name", "auto": "Auto{unit}"},
+        "description": {"target_media_players": "Select media-player entities, devices, areas, floors, or labels. They resolve when the notification runs.", "add_media_player": "Add a media-player target source"},
+        "title": {"restart": "Restart Home Assistant?", "save_changes": "Save your changes?", "reset_changes": "Reset Changes", "rename_item": "Rename item", "delete_item": "Delete item", "overwrite_files": "Overwrite Existing Files?"},
+        "notice": {"restart_required_title": "Restart Required", "restart_required": "Any changes to the folder path or its contents will require a restart to take effect.", "restart_providers": "Home Assistant needs to restart before newly installed TTS providers appear in Chime TTS.", "restart_saved": "Your changes have been saved, but they will not take effect until Home Assistant restarts.", "unsaved_changes": "You have unsaved changes. Save them before leaving this page?", "discard_changes": "Discarding your unsaved edits?", "rename_item": "Choose a new name for {name}.", "delete_item": "Delete {name}? This action cannot be undone.", "upload_folder": "Upload the \"{source}\" folder with {count} files to folder \"{destination}\"?", "upload_conflicts_all": "Those files already exist in the folder \"{destination}\".", "upload_conflicts": "{count} file(s) already exist in the folder \"{destination}\"."},
+        "status": {"changed": "Changed", "copied": "Copied", "sent": "Sent", "restarting": "Restarting...", "restart_requested": "Home Assistant restart requested."},
+        "empty": {"profiles": "No Chime TTS notify profiles are configured yet.", "logs": "No Chime TTS logs have been captured in this Home Assistant session yet.", "raw_logs": "No raw logs were captured for this event.", "media_players": "No media players selected yet.", "folder": "No files or folders match this location."},
+        "picker": {"audio_files_found": "{count} audio file(s) found", "no_audio_files": "No audio files were found in this folder."},
+        "log": {"integration_initiation": "Integration initiation", "notification": "Notification", "configuration_update": "Configuration update", "action_call": "Action call"},
+        "validation": {"required": "This field is required.", "invalid_number": "Enter a valid number.", "invalid_yaml": "Enter valid YAML.", "timeout": "The timeout value is invalid.", "timeout_sub": "Enter a valid timeout duration.", "tts_platform_none": "No TTS platforms were detected. Add at least one TTS integration first.", "tts_platform_select": "The selected TTS platform was not found.", "temp_path": "The temp folder must be inside a configured media directory.", "www_path": "The say_url output folder must be inside an external directory, /media, or /config/www."},
+        "error": {"load_panel": "Unable to load Chime TTS panel.", "load_profiles": "Unable to load notification profiles.", "debug_logs": "Unable to update the Chime TTS debug log setting.", "validate_folder": "Unable to validate this folder path right now.", "restart": "Unable to request a Home Assistant restart.", "copy_logs": "Unable to copy logs to the clipboard.", "copy_yaml": "Unable to copy YAML to the clipboard.", "repeat": "Unable to repeat this action.", "save": "Unable to save Chime TTS settings.", "browse_folders": "Unable to browse folders.", "play_chime_preview": "Unable to play this chime preview.", "play_audio_preview": "Unable to play this audio preview.", "browser_action": "Unable to complete that browser action.", "upload_files": "Unable to upload the selected files.", "folder_name_required": "Enter a folder name.", "new_name_required": "Enter a new name.", "folder_not_selectable": "That folder cannot be selected for this field.", "send_notification": "Unable to send notify.{service}."}
+    },
     "options": {
         "step": {
             "init": {
                 "title": "Chime TTS Configuration",
-                "description": "Configurable options for the `chime_tts.say` and `chime_tts.say_url` actions. See the integration documentation for more details.",
+                "description": "## Recommended\r\n\r\n### Open the [Chime TTS configuration panel]({panel_url}) for the best experience.\r\n\r\nThe configuration panel includes the richer visual settings UI and is the recommended way to manage Chime TTS settings. This native dialog is kept as a basic fallback.\r\n\r\nConfigurable options for the `chime_tts.say` and `chime_tts.say_url` actions are available below.\r\n\r\nPlease review the [documentation]({documentation_url}) for more details",
                 "data": {
-                    "queue_timeout": "Service call timeout (in seconds)",
+                    "queue_timeout": "Action timeout (in seconds)",
                     "tts_timeout": "TTS audio generation timeout (in seconds)",
                     "tts_platform_key": "Default TTS platform",
                     "default_language_key": "Default language (when using default TTS platform)",
                     "default_voice_key": "Default voice (when using default TTS platform)",
                     "default_tld_key": "Default dialect (when using the Google Translate TTS platform)",
+                    "default_pre_script_key": "Default pre-playback script",
+                    "default_post_script_key": "Default post-playback script",
                     "fallback_tts_platform_key": "Fallback TTS platform",
+                    "fallback_tts_cache_key": "Cache audio generated by the fallback TTS platform (off by default \u2014 cached audio is keyed to the requested platform, so caching the fallback's audio keeps serving its voice after the requested platform recovers)",
+                    "fallback_tts_report_key": "Report use of the fallback TTS platform as a 'debug' log entry (default), a 'warning' log entry, a 'notification', or a 'repair' issue that clears once the requested platform works again",
                     "offset": "Default offset value (in milliseconds) between chimes & TTS audio",
+                    "crossfade": "Default crossfade value (in milliseconds) between audio segments",
                     "fade_transition_key": "Fade transition (in milliseconds) when fading currently playing audio for `announce` and `fade_audio`",
                     "remove_temp_file_delay": "Delay (in milliseconds) before removing temporary files",
                     "custom_chimes_path": "Folder path for custom chime audio files",
@@ -250,12 +308,19 @@
         "error": {
             "timeout": "The timeout value is invalid",
             "timeout_sub": "Enter a valid timeout duration",
+            "invalid_number": "Enter a valid number",
             "tts_platform_none": "No TTS platforms were detected. Please add at least 1 TTS integration.",
             "tts_platform_select": "The TTS platform was not found. Please make sure it has been installed before selecting it.",
             "multiple": "Multiple issues detected",
             "invalid_chime_paths": "Invalid custom chime path detected",
             "temp_path": "The temp folder must be a subfolder of a media directory",
             "www_path": "The chime_tts.say_url folder must be a subfolder of an external directory, eg: /config/www/chime_tts"
+        }
+    },
+    "issues": {
+        "fallback_tts_in_use": {
+            "title": "Chime TTS is using the fallback TTS platform",
+            "description": "The requested TTS platform {primary_platform} failed to generate audio, so the fallback platform {fallback_platform} was used instead. This issue clears automatically once {primary_platform} generates audio again."
         }
     }
 }
