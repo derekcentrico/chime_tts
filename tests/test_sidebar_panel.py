@@ -2398,3 +2398,21 @@ def test_custom_chimes_browser_removes_directory_link(tmp_path: Path) -> None:
 
     assert not link.is_symlink()
     assert (outside / "file.txt").exists()
+
+
+def test_custom_chimes_upload_stays_inside_chimes_folder(tmp_path: Path) -> None:
+    """Browsing anywhere for a chimes folder must not allow uploading anywhere."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    existing = paths["config_dir"] / "alarm.mp3"
+    existing.write_bytes(b"original")
+
+    with pytest.raises(PermissionError):
+        settings_module.save_browser_upload(
+            hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(paths["config_dir"]), "alarm.mp3", b"new"
+        )
+    assert existing.read_bytes() == b"original"
+
+    settings_module.save_browser_upload(
+        hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(paths["custom_chimes_dir"]), "sets/ding.mp3", b"audio"
+    )
+    assert (paths["custom_chimes_dir"] / "sets" / "ding.mp3").read_bytes() == b"audio"

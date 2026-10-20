@@ -2613,6 +2613,11 @@ def resolve_browser_upload_target_path(
         hass, config_entry, field_key, final_path, current_values
     ):
         raise PermissionError(final_path)
+    # Uploads can overwrite, so they follow the same boundary as rename/delete.
+    if field_key == CUSTOM_CHIMES_PATH_KEY and not _is_path_mutable_for_field(
+        hass, config_entry, field_key, final_path, current_values
+    ):
+        raise PermissionError(final_path)
     return final_path, "/".join(relative_parts)
 
 
