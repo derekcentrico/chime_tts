@@ -2022,7 +2022,10 @@ async def async_get_cached_audio_data(hass: HomeAssistant, filepath_hash: str):
                         else:
                             _LOGGER.warning("Could not load audio from file: %s", audio_dict.get(key, ""))
                             audio_dict[key] = None
-        return audio_dict
+        # With no usable path left, fall through and drop the entry so the
+        # regenerated audio gets cached again.
+        if audio_dict.get(LOCAL_PATH_KEY) or audio_dict.get(PUBLIC_PATH_KEY):
+            return audio_dict
 
     await async_remove_cached_audio_data(hass, filepath_hash, True, True)
     return None

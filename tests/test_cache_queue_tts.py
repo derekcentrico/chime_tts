@@ -145,10 +145,15 @@ async def test_async_get_cached_audio_data_drops_unloadable_path(monkeypatch: py
     )
     monkeypatch.setattr(integration_module.filesystem_helper, "path_exists", lambda path: True)
     monkeypatch.setattr(integration_module, "async_get_audio_from_path", AsyncMock(return_value=None))
+    remove = AsyncMock()
+    monkeypatch.setattr(integration_module, "async_remove_cached_audio_data", remove)
 
     result = await integration_module.async_get_cached_audio_data(FakeHass(), "corrupt")
 
-    assert result == {LOCAL_PATH_KEY: None, PUBLIC_PATH_KEY: None}
+    # No usable path is left, so the entry is dropped and the caller regenerates
+    # and re-caches the audio.
+    assert result is None
+    remove.assert_awaited_once()
 
 
 class _MemoryStore:
