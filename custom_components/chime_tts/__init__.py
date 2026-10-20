@@ -1729,35 +1729,28 @@ def _squeezebox_service_calls(entity_ids: list[str], service_data: dict, extra: 
             _LOGGER.debug("     - %s", entity_id)
         announce = squeezebox_service_data.get(ATTR_MEDIA_ANNOUNCE)
 
-        # If all media_players have same target volume level
-        uniform_target_volume = media_player_helper.get_uniform_target_volume_level(entity_ids)
-        if uniform_target_volume != -1:
-            squeezebox_service_data[CONF_ENTITY_ID] = entity_ids
-            squeezebox_extra = _squeezebox_extra(extra, uniform_target_volume, announce)
-            if squeezebox_extra:
-                squeezebox_service_data["extra"] = squeezebox_extra
+        # Unset (-1) targets are kept distinct from explicit ones, so a player
+        # without a level never inherits another player's announce_volume.
+        extras: dict[str, dict] = {}
+        for entity_id in entity_ids:
+            target = media_player_helper.get_media_player_target_volume(entity_id)
+            extras[entity_id] = _squeezebox_extra(extra, -1 if target is None else target, announce)
+
+        # One shared call when every player gets the same extra, else one call each
+        shared = all(e == extras[entity_ids[0]] for e in extras.values())
+        groups = [entity_ids] if shared else [[entity_id] for entity_id in entity_ids]
+        for group in groups:
+            group_service_data = squeezebox_service_data.copy()
+            group_service_data[CONF_ENTITY_ID] = group if shared else group[0]
+            if extras[group[0]]:
+                group_service_data["extra"] = extras[group[0]]
             service_calls.append({
                 "domain": "media_player",
                 "service": SERVICE_PLAY_MEDIA,
-                "service_data": squeezebox_service_data,
+                "service_data": group_service_data,
                 "blocking": True,
                 "result": True
             })
-        else:
-            # Else 1 media_player.play_media service call per Squeezebox media_player, with the media_player's target volume level
-            for media_player in media_player_helper.get_media_players_from_entity_ids(entity_ids):
-                individual_service_data = squeezebox_service_data.copy()
-                individual_service_data[CONF_ENTITY_ID] = media_player.entity_id
-                squeezebox_extra = _squeezebox_extra(extra, media_player.target_volume_level, announce)
-                if squeezebox_extra:
-                    individual_service_data["extra"] = squeezebox_extra
-                service_calls.append({
-                    "domain": "media_player",
-                    "service": SERVICE_PLAY_MEDIA,
-                    "service_data": individual_service_data,
-                    "blocking": True,
-                    "result": True
-                })
     return service_calls
 
 async def async_prepare_media_service_calls(
@@ -1993,7 +1986,7 @@ async def async_post_playback_actions(hass: HomeAssistant,
     # Wait for playback to end on all media_players
     playing_media_players: list[ChimeTTSMediaPlayer] = []
     for media_player in media_players_array:
-        if not(media_player_helper.announce and (media_player.platform == SPOTIFY_PLATFORM or media_player.platform == SONOS_PLATFORM)) and not media_player_helper.get_uses_announce_volume(media_player):
+        if not(media_player_helper.announce and (media_player.platform == SPOTIFY_PLATFORM or media_player.platform == SONOS_PLATFORM)) and not media_player_helper.get_resumes_after_announce(media_player):
             playing_media_players.append(media_player)
     if not await media_player_helper.async_wait_until_media_players_state_not(hass, playing_media_players, "playing"):
         _LOGGER.debug(" - Timed out waiting for playback to complete")

@@ -192,13 +192,45 @@ class MediaPlayerHelper:
         """Whether the player takes its target volume from the announcement itself.
 
         Squeezebox applies `extra.announce_volume` for the announcement only and
-        restores the previous level afterwards, so no volume_set is needed.
+        restores the previous level afterwards, so no volume_set is needed. Only
+        true when an `announce_volume` is actually sent for this player's level:
+        a target of 0 or none falls back to volume_set, and a joined member only
+        qualifies if the leader's announcement carries the same level.
         """
+        if not (
+            self.get_resumes_after_announce(media_player)
+            and 0 < media_player.target_volume_level <= 1
+        ):
+            return False
+        leader = self.get_join_leader()
+        if leader is None or leader is media_player or not media_player.join_supported:
+            return True
+        return (
+            leader.platform == SQUEEZEBOX_PLATFORM
+            and leader.target_volume_level == media_player.target_volume_level
+            and self.get_uses_announce_volume(leader)
+        )
+
+    def get_resumes_after_announce(self, media_player: ChimeTTSMediaPlayer) -> bool:
+        """Whether a Squeezebox returns to its previous state after the announcement."""
         return bool(
             self.announce
             and media_player.announce_supported
             and media_player.platform == SQUEEZEBOX_PLATFORM
         )
+
+    def get_join_leader(self) -> ChimeTTSMediaPlayer | None:
+        """Player that will lead the speaker group, or None when not joining.
+
+        Mirrors the leader choice in async_join_media_players, which runs after
+        the pre-playback volume_set and so cannot be consulted yet.
+        """
+        if not self.join_players:
+            return None
+        for media_player in self.media_players:
+            if media_player.join_supported:
+                return media_player
+        return None
 
     def get_platform_from_entity_id(self, entity_id):
         """Platform for the media_player with entity_id."""

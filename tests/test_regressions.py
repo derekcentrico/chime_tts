@@ -2184,6 +2184,11 @@ async def test_issue_318_segment_conversion_to_other_format_leaves_no_files(tmp_
 
 
 def _squeezebox_player(entity_id, volume, platform="squeezebox", announce_supported=True):
+
+
+def _squeezebox_player(
+    entity_id, volume, platform="squeezebox", announce_supported=True, join_supported=False
+):
     from types import SimpleNamespace
 
     return SimpleNamespace(
@@ -2193,15 +2198,19 @@ def _squeezebox_player(entity_id, volume, platform="squeezebox", announce_suppor
         initial_volume_level=0.2,
         initially_playing=False,
         announce_supported=announce_supported,
+        join_supported=join_supported,
     )
 
 
-def _squeezebox_helper(monkeypatch, players, announce=True, joined=None, members=()):
+def _squeezebox_helper(
+    monkeypatch, players, announce=True, joined=None, members=(), join_players=False
+):
     integration = importlib.import_module("custom_components.chime_tts")
     helper = integration.media_player_helper
     monkeypatch.setattr(helper, "media_players", players)
     monkeypatch.setattr(helper, "announce", announce)
     monkeypatch.setattr(helper, "fade_audio", False)
+    monkeypatch.setattr(helper, "join_players", join_players)
     monkeypatch.setattr(helper, "joined_entity_id", joined, raising=False)
     monkeypatch.setattr(helper, "joined_media_player_entity_ids", list(members))
     return integration, helper
@@ -2343,3 +2352,71 @@ async def test_issue_309_squeezebox_group_leader_routed_by_platform(monkeypatch)
 
     assert [c["service_data"]["entity_id"] for c in calls] == [["media_player.kitchen"]]
     assert "extra" not in calls[0]["service_data"]
+
+
+def test_issue_309_squeezebox_zero_or_unset_target_keeps_volume_set(monkeypatch):
+    """Without a usable announce_volume the player stays on the volume_set path."""
+    zero = _squeezebox_player("media_player.garage", 0)
+    unset = _squeezebox_player("media_player.porch", -1)
+    usable = _squeezebox_player("media_player.kitchen", 0.4)
+    _, helper = _squeezebox_helper(monkeypatch, [zero, unset, usable])
+
+    assert helper.get_uses_announce_volume(zero) is False
+    assert helper.get_uses_announce_volume(unset) is False
+    assert helper.get_uses_announce_volume(usable) is True
+    # -1 means "leave the volume alone", so only the explicit 0 is set and restored
+    assert helper.get_set_volume_media_players() == [zero]
+    # The announcement still restores the prior state, so no wait for "playing" to end
+    assert helper.get_resumes_after_announce(zero) is True
+    assert helper.get_resumes_after_announce(unset) is True
+
+
+async def test_issue_309_squeezebox_unset_target_not_batched_with_explicit(monkeypatch):
+    """A player with no target never inherits another player's announce_volume."""
+    players = [
+        _squeezebox_player("media_player.kitchen", 0.4),
+        _squeezebox_player("media_player.porch", -1),
+    ]
+    integration, _ = _squeezebox_helper(monkeypatch, players)
+
+    calls = await integration.async_prepare_media_service_calls(
+        None, [p.entity_id for p in players], _squeezebox_service_data(), {}
+    )
+
+    by_entity = {c["service_data"]["entity_id"]: c["service_data"] for c in calls}
+    assert set(by_entity) == {"media_player.kitchen", "media_player.porch"}
+    assert by_entity["media_player.kitchen"]["extra"] == {"announce_volume": 0.4}
+    assert "extra" not in by_entity["media_player.porch"]
+
+
+def test_issue_309_squeezebox_joined_member_with_own_level_keeps_volume_set(monkeypatch):
+    """A member whose level differs from the leader's announcement is volume_set."""
+    leader = _squeezebox_player("media_player.kitchen", 0.5, join_supported=True)
+    same = _squeezebox_player("media_player.office", 0.5, join_supported=True)
+    differs = _squeezebox_player("media_player.garage", 0.7, join_supported=True)
+    solo = _squeezebox_player("media_player.porch", 0.7)
+    _, helper = _squeezebox_helper(
+        monkeypatch, [leader, same, differs, solo], join_players=True
+    )
+
+    assert helper.get_join_leader() is leader
+    assert helper.get_uses_announce_volume(leader) is True
+    assert helper.get_uses_announce_volume(same) is True
+    assert helper.get_uses_announce_volume(differs) is False
+    # Not joinable, so it plays on its own call with its own announce_volume
+    assert helper.get_uses_announce_volume(solo) is True
+    assert helper.get_set_volume_media_players() == [differs]
+
+
+def test_issue_309_squeezebox_members_volume_set_when_leader_sends_none(monkeypatch):
+    """Members fall back to volume_set when the leader carries no announce_volume."""
+    leader = _squeezebox_player("media_player.kitchen", -1, join_supported=True)
+    member = _squeezebox_player("media_player.office", 0.5, join_supported=True)
+    cast_leader = _squeezebox_player(
+        "media_player.tv", 0.5, platform="cast", join_supported=True
+    )
+    _, helper = _squeezebox_helper(monkeypatch, [leader, member], join_players=True)
+    assert helper.get_set_volume_media_players() == [member]
+
+    _, helper = _squeezebox_helper(monkeypatch, [cast_leader, member], join_players=True)
+    assert helper.get_uses_announce_volume(member) is False
