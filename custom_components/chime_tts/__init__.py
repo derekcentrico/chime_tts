@@ -1,5 +1,6 @@
 """The Chime TTS integration."""
 
+import asyncio
 import logging
 import os
 import time
@@ -80,6 +81,7 @@ from .const import (
     ALEXA_MEDIA_PLAYER_PLATFORM,
     FFMPEG_ARGS_ALEXA,
     SONOS_PLATFORM,
+    SONOS_VOLUME_SETTLE_MS,
     MP3_PRESET_CUSTOM_PREFIX,
     MP3_PRESET_CUSTOM_KEY,
     QUEUE_TIMEOUT_KEY,
@@ -1691,6 +1693,8 @@ def _sonos_volume_set_call(entity_id, volume_percent: int):
         },
         "blocking": True,
         "result": True,
+        # Let the speaker apply the new level before the announcement arrives.
+        "delay_after": SONOS_VOLUME_SETTLE_MS,
     }
 
 async def async_prepare_media_service_calls(
@@ -1851,6 +1855,10 @@ async def async_fire_media_service_calls(hass: HomeAssistant, media_service_call
                 service=service_call["service"],
                 service_data=service_call["service_data"]
             )
+            # Optional settle delay before the next call (Sonos volume_set ahead of play_media)
+            delay_after = service_call.get("delay_after", 0)
+            if isinstance(delay_after, (int, float)) and delay_after > 0:
+                await asyncio.sleep(delay_after / 1000)
         except ServiceNotFound:
             _LOGGER.error("Could not find service `%s.%s`.%s",
                     service_call["domain"],

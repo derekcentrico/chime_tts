@@ -1138,6 +1138,77 @@ def test_issue_275_sonos_explicit_volume_set_call():
     assert _sonos_volume_set_call("x", -5)["service_data"]["volume_level"] == 0.0
 
 
+def test_issue_275_sonos_volume_set_carries_settle_delay():
+    """The Sonos volume_set asks the runner to wait before play_media fires."""
+    from custom_components.chime_tts import _sonos_volume_set_call
+    from custom_components.chime_tts.const import SONOS_VOLUME_SETTLE_MS
+
+    call = _sonos_volume_set_call("media_player.kitchen", 50)
+    assert call["delay_after"] == SONOS_VOLUME_SETTLE_MS
+    assert SONOS_VOLUME_SETTLE_MS > 0
+
+
+def _fire_calls_with_fake_sleep(monkeypatch, calls, fail_service=None):
+    integration = importlib.import_module("custom_components.chime_tts")
+    events = []
+
+    class _Services:
+        async def async_call(self, domain, service, service_data=None):
+            if service == fail_service:
+                raise RuntimeError("boom")
+            events.append(("call", service))
+
+    class _Hass:
+        services = _Services()
+
+    async def _fake_sleep(seconds):
+        events.append(("sleep", seconds))
+
+    monkeypatch.setattr(integration.asyncio, "sleep", _fake_sleep)
+    result = asyncio.run(integration.async_fire_media_service_calls(_Hass(), calls))
+    return result, events
+
+
+def test_issue_275_runner_sleeps_after_tagged_call(monkeypatch):
+    """The settle delay runs between volume_set and the play_media that follows."""
+    from custom_components.chime_tts import _sonos_volume_set_call
+
+    calls = [
+        _sonos_volume_set_call("media_player.kitchen", 40),
+        {
+            "domain": "media_player",
+            "service": "play_media",
+            "service_data": {"entity_id": "media_player.kitchen"},
+        },
+    ]
+    result, events = _fire_calls_with_fake_sleep(monkeypatch, calls)
+
+    assert result is True
+    assert events == [("call", "volume_set"), ("sleep", 0.2), ("call", "play_media")]
+
+
+def test_issue_275_runner_does_not_sleep_without_tag(monkeypatch):
+    """Untagged, zero, non-numeric and failed calls add no delay."""
+    calls = [
+        {"domain": "media_player", "service": "play_media", "service_data": {}},
+        {"domain": "media_player", "service": "volume_set", "service_data": {}, "delay_after": 0},
+        {"domain": "media_player", "service": "volume_set", "service_data": {}, "delay_after": "200"},
+    ]
+    result, events = _fire_calls_with_fake_sleep(monkeypatch, calls)
+
+    assert result is True
+    assert [e for e in events if e[0] == "sleep"] == []
+
+    failing = [
+        {"domain": "media_player", "service": "volume_set", "service_data": {}, "delay_after": 200},
+        {"domain": "media_player", "service": "play_media", "service_data": {}},
+    ]
+    result, events = _fire_calls_with_fake_sleep(monkeypatch, failing, fail_service="volume_set")
+
+    assert result is False
+    assert events == []
+
+
 def test_media_content_id_missing_path_returns_none():
     helper = MediaPlayerHelper()
     hass = _FakeMediaHass({"media": "/media"})
