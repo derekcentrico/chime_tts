@@ -2499,6 +2499,28 @@ def _is_path_within_browser_roots(
     return False
 
 
+def _is_path_mutable_for_field(
+    hass,
+    config_entry: config_entries.ConfigEntry,
+    field_key: str,
+    path: str,
+    values: dict[str, Any] | None = None,
+) -> bool:
+    """Return whether a path may be renamed or deleted from the browser."""
+    if field_key != CUSTOM_CHIMES_PATH_KEY:
+        return _is_path_within_browser_roots(hass, config_entry, field_key, path, values)
+
+    # The custom chimes picker can browse the whole filesystem, so destructive
+    # actions stay inside the configured chimes folder.
+    current_values = values or get_settings_data(hass, config_entry)
+    chimes_root = _normalize_string(current_values.get(CUSTOM_CHIMES_PATH_KEY)).rstrip("/")
+    if not chimes_root or not os.path.isabs(chimes_root):
+        return False
+    resolved_root = os.path.realpath(chimes_root)
+    resolved_path = os.path.realpath(str(path or "").rstrip("/") or "/")
+    return resolved_path != resolved_root and _is_subdirectory(resolved_root, resolved_path)
+
+
 def resolve_browser_audio_file_path(
     hass,
     config_entry: config_entries.ConfigEntry,
@@ -2960,7 +2982,7 @@ def rename_browser_entry(
     source_path = normalized_path.rstrip("/") or "/"
     if source_path == "/":
         raise ValueError("cannot_rename_root")
-    if not _is_path_within_browser_roots(
+    if not _is_path_mutable_for_field(
         hass,
         config_entry,
         field_key,
@@ -2970,7 +2992,7 @@ def rename_browser_entry(
         raise PermissionError(source_path)
     parent_path = os.path.dirname(source_path) or "/"
     target_path = _safe_browser_child_path(parent_path, new_name)
-    if not _is_path_within_browser_roots(
+    if not _is_path_mutable_for_field(
         hass,
         config_entry,
         field_key,
@@ -3012,7 +3034,7 @@ def delete_browser_entry(
     source_path = normalized_path.rstrip("/") or "/"
     if source_path == "/":
         raise ValueError("cannot_delete_root")
-    if not _is_path_within_browser_roots(
+    if not _is_path_mutable_for_field(
         hass,
         config_entry,
         field_key,

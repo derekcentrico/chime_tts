@@ -2152,3 +2152,90 @@ async def test_websocket_repeat_log_action_replays_notification_with_none_data_p
     ]
     payload = connection.results[-1][1]
     assert payload["message_type"] == "success"
+
+
+class _FakeRequest(dict):
+    """Minimal aiohttp request stand-in for HTTP view handlers."""
+
+    def __init__(self, hass, query: dict[str, str], is_admin: bool) -> None:
+        super().__init__(hass_user=SimpleNamespace(is_admin=is_admin))
+        self.app = {"hass": hass}
+        self.query = query
+
+
+@pytest.mark.parametrize(
+    "view_cls",
+    [
+        panel_module.ChimeTTSPanelBrowserUploadView,
+        panel_module.ChimeTTSPanelBrowserAudioView,
+        panel_module.ChimeTTSPanelChimePreviewView,
+        panel_module.ChimeTTSPanelChimeSetOffsetPreviewView,
+    ],
+)
+async def test_panel_file_views_require_admin(tmp_path: Path, view_cls) -> None:
+    """Non-admin users must not reach the panel's file endpoints."""
+    from homeassistant.exceptions import Unauthorized
+
+    hass, _config_entry, _paths = make_hass(tmp_path)
+    handler = getattr(view_cls, "post", None) or view_cls.get
+    with pytest.raises(Unauthorized):
+        await handler(object.__new__(view_cls), _FakeRequest(hass, {}, is_admin=False))
+
+
+async def test_chime_preview_refuses_non_audio_files(tmp_path: Path, monkeypatch) -> None:
+    """A free-text chime value must not turn the preview into a file reader."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    secret = paths["config_dir"] / "secrets.yaml"
+    secret.write_text("api_key: hunter2\n")
+
+    async def fake_get_chime_path(chime_path, *_args):
+        return chime_path
+
+    async def fake_validate_path(_hass, path):
+        return path
+
+    monkeypatch.setattr(panel_module.filesystem_helper, "async_get_chime_path", fake_get_chime_path)
+    monkeypatch.setattr(panel_module.filesystem_helper, "async_validate_path", fake_validate_path)
+
+    request = _FakeRequest(hass, {"field_key": "chime_path", "value": str(secret)}, is_admin=True)
+    with pytest.raises(panel_module.web.HTTPForbidden):
+        await panel_module.ChimeTTSPanelChimePreviewView().get(request)
+
+    chime = paths["custom_chimes_dir"] / "ding.mp3"
+    chime.write_bytes(b"audio")
+    request = _FakeRequest(hass, {"field_key": "chime_path", "value": str(chime)}, is_admin=True)
+    response = await panel_module.ChimeTTSPanelChimePreviewView().get(request)
+    assert str(response._path) == str(chime)
+
+
+def test_custom_chimes_browser_only_mutates_inside_chimes_folder(tmp_path: Path) -> None:
+    """Browsing anywhere for a chimes folder must not allow deleting anywhere."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    outside = paths["config_dir"] / "secrets.yaml"
+    outside.write_text("api_key: hunter2\n")
+
+    with pytest.raises(PermissionError):
+        settings_module.delete_browser_entry(hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(outside))
+    with pytest.raises(PermissionError):
+        settings_module.delete_browser_entry(
+            hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(paths["config_dir"])
+        )
+    with pytest.raises(PermissionError):
+        settings_module.rename_browser_entry(
+            hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(outside), "x.yaml"
+        )
+    with pytest.raises(PermissionError):
+        settings_module.delete_browser_entry(
+            hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(paths["custom_chimes_dir"])
+        )
+    assert outside.exists()
+
+    inside = paths["custom_chimes_dir"] / "old.mp3"
+    inside.write_bytes(b"audio")
+    settings_module.rename_browser_entry(
+        hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(inside), "new.mp3"
+    )
+    renamed = paths["custom_chimes_dir"] / "new.mp3"
+    assert renamed.exists()
+    settings_module.delete_browser_entry(hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(renamed))
+    assert not renamed.exists()

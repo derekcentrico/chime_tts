@@ -18,6 +18,7 @@ from homeassistant.components.frontend import (
 from homeassistant.components import websocket_api
 from homeassistant.components.logger.helpers import get_integration_loggers
 from homeassistant.components.http import HomeAssistantView
+from homeassistant.components.http.decorators import require_admin
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_LOGGING_CHANGED
 from homeassistant.core import HomeAssistant, callback
@@ -329,6 +330,7 @@ class ChimeTTSPanelBrowserUploadView(HomeAssistantView):
     name = PANEL_BROWSER_UPLOAD_VIEW_NAME
     requires_auth = True
 
+    @require_admin
     async def post(self, request) -> web.StreamResponse:
         """Upload one or more files into the currently browsed folder."""
         hass: HomeAssistant = request.app["hass"]
@@ -437,6 +439,7 @@ class ChimeTTSPanelBrowserAudioView(HomeAssistantView):
     name = PANEL_BROWSER_AUDIO_VIEW_NAME
     requires_auth = True
 
+    @require_admin
     async def get(self, request) -> web.StreamResponse:
         """Return an audio file for in-panel playback."""
         hass: HomeAssistant = request.app["hass"]
@@ -481,6 +484,7 @@ class ChimeTTSPanelChimePreviewView(HomeAssistantView):
     name = PANEL_CHIME_PREVIEW_VIEW_NAME
     requires_auth = True
 
+    @require_admin
     async def get(self, request) -> web.StreamResponse:
         """Return a selected chime audio file for in-panel playback."""
         hass: HomeAssistant = request.app["hass"]
@@ -524,6 +528,9 @@ class ChimeTTSPanelChimePreviewView(HomeAssistantView):
         validated_path = await filesystem_helper.async_validate_path(hass, resolved_path)
         if not validated_path:
             raise web.HTTPNotFound(text="The selected chime preview file could not be found.")
+        # The value is free text, so without this any readable file could be served.
+        if not _is_supported_audio_upload(validated_path):
+            raise web.HTTPForbidden(text="Only audio files can be previewed.")
 
         content_type = mimetypes.guess_type(validated_path)[0]
         response = web.FileResponse(
@@ -541,6 +548,7 @@ class ChimeTTSPanelChimeSetOffsetPreviewView(HomeAssistantView):
     name = PANEL_CHIME_SET_OFFSET_PREVIEW_VIEW_NAME
     requires_auth = True
 
+    @require_admin
     async def get(self, request) -> web.StreamResponse:
         """Render the requested chime-set offset preview."""
         hass: HomeAssistant = request.app["hass"]
