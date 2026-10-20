@@ -2908,3 +2908,29 @@ async def test_issue_352_failed_save_reports_profiles_now_on_disk(
     assert payload["message_type"] == "error"
     assert [profile["name"] for profile in payload["notify_profiles"]] == ["half_written"]
     assert payload["restart_required"] is True
+
+
+def test_issue_352_hard_linked_configuration_is_written_in_place(tmp_path: Path) -> None:
+    """A hard-linked configuration.yaml keeps every link pointing at the new content."""
+    config_file = tmp_path / "configuration.yaml"
+    config_file.write_text("old: 1\n", encoding="utf-8")
+    alias = tmp_path / "alias.yaml"
+    os.link(config_file, alias)
+
+    settings_module._write_text_atomically(str(config_file), "new: 2\n")
+
+    assert alias.read_text(encoding="utf-8") == "new: 2\n"
+    assert os.stat(alias).st_ino == os.stat(config_file).st_ino
+
+
+def test_issue_352_replace_fsyncs_the_directory(tmp_path: Path, monkeypatch) -> None:
+    """After the rename, the directory entry is flushed too."""
+    config_file = tmp_path / "configuration.yaml"
+    config_file.write_text("old: 1\n", encoding="utf-8")
+    synced: list[str] = []
+    monkeypatch.setattr(settings_module, "_fsync_directory", synced.append)
+
+    settings_module._write_text_atomically(str(config_file), "new: 2\n")
+
+    assert config_file.read_text(encoding="utf-8") == "new: 2\n"
+    assert synced == [str(tmp_path)]

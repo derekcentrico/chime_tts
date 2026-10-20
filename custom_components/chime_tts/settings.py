@@ -1776,6 +1776,20 @@ def _temp_matches_target(temp_path: str, target: str, current: os.stat_result) -
     return target_label is None or target_label == _selinux_label(temp_path)
 
 
+def _fsync_directory(directory: str) -> None:
+    """Flush a directory entry so a completed rename survives a power loss."""
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        # Some filesystems refuse fsync on a directory; the rename still happened.
+        with contextlib.suppress(OSError):
+            os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 _READ_ONLY_DIR_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 
@@ -1800,7 +1814,10 @@ def _write_text_atomically(path: str, content: str) -> None:
     ):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), target)
     directory = os.path.dirname(target)
-    if _has_posix_acl(target) or _has_posix_acl(directory, "system.posix_acl_default"):
+    # A rename would detach other hard links from the new content.
+    if current.st_nlink > 1 or _has_posix_acl(target) or _has_posix_acl(
+        directory, "system.posix_acl_default"
+    ):
         _write_text_in_place(target, content)
         return
 
@@ -1837,6 +1854,8 @@ def _write_text_atomically(path: str, content: str) -> None:
                 raise
             os.unlink(temp_path)
             _write_text_in_place(target, content)
+            return
+        _fsync_directory(directory)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temp_path)
