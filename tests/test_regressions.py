@@ -1641,7 +1641,7 @@ async def test_issue_318_ffmpeg_conversion_does_not_block_event_loop(monkeypatch
 
     assert result == source
     assert AudioSegment.from_file(source).frame_rate == 16000
-    assert not (tmp_path / "source_converted.mp3").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["source.mp3"]
 
 
 async def test_issue_318_ffmpeg_file_cleanup_runs_in_executor(monkeypatch, tmp_path):
@@ -1652,12 +1652,15 @@ async def test_issue_318_ffmpeg_file_cleanup_runs_in_executor(monkeypatch, tmp_p
 
     removes = _track_off_loop(monkeypatch, helpers_module.os, "remove", str(tmp_path))
     moves = _track_off_loop(monkeypatch, helpers_module.shutil, "move", str(tmp_path))
-    # A stale converted file forces the pre-conversion delete path.
-    (tmp_path / "source_converted.mp3").write_bytes(b"stale")
+    # A stale sibling output forces the pre-conversion delete path.
+    (tmp_path / "source.wav").write_bytes(b"stale")
     source = _write_tone(tmp_path / "source.mp3")
     hass = _ThreadedExecHass()
     helper = ChimeTTSHelper()
 
+    assert await helper.async_ffmpeg_convert_from_file(hass, source, "-f wav") == source
+    assert (tmp_path / "source.wav").stat().st_size > 1000
+    (tmp_path / "source.wav").unlink()
     assert await helper.async_ffmpeg_convert_from_file(hass, source, "-ar 16000") == source
     converted = await helper.async_ffmpeg_convert_from_audio_segment(
         hass, Sine(440).to_audio_segment(duration=500), "-ar 16000", str(tmp_path)
@@ -1762,6 +1765,207 @@ async def test_issue_318_cleanup_survives_second_cancel(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)
     assert processes[0].returncode is not None
     assert list(tmp_path.iterdir()) == []
+
+
+async def _wait_for_dir(tmp_path, expected, timeout=5.0):
+    """Poll until tmp_path holds exactly the expected file names."""
+    for _ in range(int(timeout / 0.05)):
+        if sorted(p.name for p in tmp_path.iterdir()) == expected:
+            return
+        await asyncio.sleep(0.05)
+    assert sorted(p.name for p in tmp_path.iterdir()) == expected
+
+
+async def test_issue_318_concurrent_conversions_of_one_file_use_separate_outputs(monkeypatch, tmp_path):
+    """Two conversions of the same source write different output files (#318)."""
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    real_exec = asyncio.create_subprocess_exec
+    outputs = []
+
+    async def _recording_exec(*cmd, **kwargs):
+        outputs.append(cmd[-1])
+        return await real_exec(*cmd, **kwargs)
+
+    monkeypatch.setattr(helpers_module.asyncio, "create_subprocess_exec", _recording_exec)
+    source = _write_tone(tmp_path / "source.mp3")
+    hass = _ThreadedExecHass()
+    helper = ChimeTTSHelper()
+
+    results = await asyncio.gather(
+        helper.async_ffmpeg_convert_from_file(hass, source, "-ar 16000"),
+        helper.async_ffmpeg_convert_from_file(hass, source, "-ar 22050"),
+    )
+
+    assert results == [source, source]
+    assert len(set(outputs)) == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["source.mp3"]
+
+
+async def test_issue_318_ffmpeg_failure_removes_partial_output(monkeypatch, tmp_path):
+    """A non-zero FFmpeg exit deletes whatever output it left behind (#318)."""
+    import sys
+
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _failing_exec(*cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"partial")
+        return await real_exec(sys.executable, "-c", "import sys; sys.exit(1)", **kwargs)
+
+    monkeypatch.setattr(helpers_module.asyncio, "create_subprocess_exec", _failing_exec)
+    source = _write_tone(tmp_path / "source.mp3")
+
+    result = await ChimeTTSHelper().async_ffmpeg_convert_from_file(_ThreadedExecHass(), source, "-ar 16000")
+
+    assert result is False
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["source.mp3"]
+
+
+async def test_issue_318_failed_move_removes_converted_output(monkeypatch, tmp_path):
+    """If the converted file can't replace the source, it is deleted (#318)."""
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    def _failing_move(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(helpers_module.shutil, "move", _failing_move)
+    source = _write_tone(tmp_path / "source.mp3")
+
+    result = await ChimeTTSHelper().async_ffmpeg_convert_from_file(_ThreadedExecHass(), source, "-ar 16000")
+
+    assert result is False
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["source.mp3"]
+
+
+async def test_issue_318_cancel_during_move_removes_converted_output(monkeypatch, tmp_path):
+    """Cancelling while the move runs in the executor still cleans up the output (#318)."""
+    import threading
+
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    move_started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def _blocked_failing_move(*_args):
+        loop.call_soon_threadsafe(move_started.set)
+        release.wait(10)
+        raise OSError("source vanished")
+
+    monkeypatch.setattr(helpers_module.shutil, "move", _blocked_failing_move)
+    source = _write_tone(tmp_path / "source.mp3")
+    task = asyncio.create_task(
+        ChimeTTSHelper().async_ffmpeg_convert_from_file(_ThreadedExecHass(), source, "-ar 16000")
+    )
+    await asyncio.wait_for(move_started.wait(), timeout=10)
+    assert len(list(tmp_path.iterdir())) == 2
+
+    task.cancel()
+    await asyncio.sleep(0.1)
+    assert not task.done(), "cleanup should wait for the in-flight executor job"
+    release.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    await _wait_for_dir(tmp_path, ["source.mp3"])
+
+
+async def test_issue_318_cancel_during_temp_save_removes_temp_file(monkeypatch, tmp_path):
+    """A cancel while the segment is still being exported doesn't strand the temp file (#318)."""
+    import threading
+
+    from pydub.generators import Sine
+
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    fs = helpers_module.filesystem_helper
+    export_started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def _slow_export(audio, path):
+        loop.call_soon_threadsafe(export_started.set)
+        release.wait(10)
+        audio.export(path, format="mp3")
+
+    async def _async_slow_export(audio, path):
+        await asyncio.to_thread(_slow_export, audio, path)
+
+    monkeypatch.setattr(fs, "async_export_audio", _async_slow_export)
+    task = asyncio.create_task(
+        ChimeTTSHelper().async_ffmpeg_convert_from_audio_segment(
+            _ThreadedExecHass(), Sine(440).to_audio_segment(duration=300), "-ar 16000", str(tmp_path)
+        )
+    )
+    await asyncio.wait_for(export_started.wait(), timeout=10)
+
+    task.cancel()
+    await asyncio.sleep(0.1)
+    assert not task.done(), "cleanup should wait for the in-flight executor job"
+    release.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    await _wait_for_dir(tmp_path, [])
+
+
+async def test_issue_318_abort_does_not_hang_on_held_stderr(monkeypatch, tmp_path):
+    """Stopping FFmpeg after a cancel can't hang, even if its stderr pipe stays open (#318)."""
+    import os
+    import signal
+    import sys
+
+    from pydub.generators import Sine
+
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    # A grandchild inheriting stderr keeps the pipe open after the child is killed,
+    # which is what makes an unbounded wait() hang.
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    pid_file = tmp_path / "grandchild.pid"
+    noisy = (
+        "import subprocess, sys, time; "
+        "child = subprocess.Popen(['sleep', '30'], stderr=sys.stderr); "
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid)); "
+        "sys.stderr.write('x' * 2_000_000); sys.stderr.flush(); time.sleep(30)"
+    )
+    real_exec = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    processes = []
+
+    async def _noisy_exec(*cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"partial")
+        process = await real_exec(sys.executable, "-c", noisy, **kwargs)
+        processes.append(process)
+        started.set()
+        return process
+
+    monkeypatch.setattr(helpers_module.asyncio, "create_subprocess_exec", _noisy_exec)
+    monkeypatch.setattr(helpers_module, "FFMPEG_ABORT_TIMEOUT_S", 0.5)
+    task = asyncio.create_task(
+        ChimeTTSHelper().async_ffmpeg_convert_from_audio_segment(
+            _ThreadedExecHass(), Sine(440).to_audio_segment(duration=300), "-ar 16000", str(work_dir)
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=10)
+        await asyncio.sleep(0.5)
+
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=5)
+
+        assert task in done
+        assert processes[0].returncode is not None
+        await _wait_for_dir(work_dir, [])
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+        task.cancel()
+        await asyncio.wait([task], timeout=5)
 
 
 async def test_issue_318_delete_file_runs_in_executor(monkeypatch, tmp_path):

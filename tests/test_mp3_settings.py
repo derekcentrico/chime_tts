@@ -547,11 +547,17 @@ async def test_ffmpeg_convert_uses_requested_output_format(monkeypatch: pytest.M
     monkeypatch.setattr(helpers_module.os.path, "isfile", lambda path: True)
     monkeypatch.setattr(helpers_module.filesystem_helper, "path_exists", lambda path: False)
     monkeypatch.setattr(helpers_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    moves: list[tuple[str, str]] = []
+    monkeypatch.setattr(helpers_module.shutil, "move", lambda src, dst: moves.append((src, dst)))
 
     result = await helper.async_ffmpeg_convert_from_file(hass, "media.mp3", "-f wav -ar 16000")
 
     assert result == "media.mp3"
-    assert commands == [["ffmpeg", "-i", "/tmp/source.mp3", "-f", "wav", "-ar", "16000", "/tmp/source.wav"]]
+    assert len(commands) == 1
+    assert commands[0][:-1] == ["ffmpeg", "-i", "/tmp/source.mp3", "-f", "wav", "-ar", "16000"]
+    temp_output = commands[0][-1]
+    assert temp_output.startswith("/tmp/source_converted_") and temp_output.endswith(".wav")
+    assert moves == [(temp_output, "/tmp/source.wav")]
 
 
 @pytest.mark.asyncio
