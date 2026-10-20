@@ -39,6 +39,7 @@ AUDIO_PATH_KEY = "audio_path" # <-- Deprecated
 LOCAL_PATH_KEY = "local_path"
 PUBLIC_PATH_KEY = "public_path"
 SONOS_WWW_PATH_KEY = "sonos_www_path"
+AUDIO_CACHED_KEY = "audio_cached"
 AUDIO_DURATION_KEY = "audio_duration"
 
 FADE_TRANSITION_KEY = "fade_transition_key"

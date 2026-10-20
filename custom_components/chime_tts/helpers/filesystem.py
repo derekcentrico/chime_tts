@@ -54,6 +54,9 @@ _AUDIO_EXTENSIONS = [
     ".ape",
     ".oga",
 ]
+# Generated audio is saved as secrets.token_hex(16) plus an extension, and
+# copies into the www folder keep that name
+_GENERATED_AUDIO_STEM = re.compile(r"[0-9a-f]{32}")
 
 
 # Per-request auto_decompress is missing from older aiohttp releases.
@@ -705,13 +708,48 @@ class FilesystemHelper:
         # If file exists, delete it
         if self.path_exists(file_path):
             _LOGGER.debug("Deleting file %s", file_path)
-            os.remove(file_path)
+            # Overlapping clear_cache calls can remove it first
+            try:
+                os.remove(file_path)
+            except FileNotFoundError:
+                _LOGGER.debug("File %s was already deleted", file_path)
         else:
             _LOGGER.warning("No file at path %s - unable to delete", file_path)
 
     async def async_delete_file(self, hass: HomeAssistant, file_path) -> None:
         """Run delete_file in the executor."""
         await hass.async_add_executor_job(self.delete_file, hass, file_path)
+    def delete_generated_audio_files(self, folder: str | None) -> int:
+        """Delete audio files written by this integration directly inside folder.
+
+        Only files named like generated audio are removed. Subfolders and
+        anything else in the folder are left alone. Returns the number removed.
+        """
+        if not folder:
+            return 0
+        removed = 0
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    stem, ext = os.path.splitext(entry.name)
+                    if (
+                        ext.lower() not in _AUDIO_EXTENSIONS
+                        or not _GENERATED_AUDIO_STEM.fullmatch(stem)
+                        or not entry.is_file(follow_symlinks=False)
+                    ):
+                        continue
+                    try:
+                        os.remove(entry.path)
+                        removed += 1
+                    except FileNotFoundError:
+                        continue
+                    except OSError as error:
+                        _LOGGER.warning("Unable to delete %s: %s", entry.path, error)
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            _LOGGER.warning("Unable to read folder %s: %s", folder, error)
+        return removed
 
     def get_local_path(self, hass: HomeAssistant, file_path: str = ""):
         """Convert external URL to local public path."""

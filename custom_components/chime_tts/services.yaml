@@ -29,8 +29,8 @@ clear_cache:
         boolean: null
     clear_www_tts_cache:
       default: true
-      description: Remove the publicly accessible audio files stored in the Chime
-        TTS cache
+      description: Remove the publicly accessible audio files Chime TTS saved to
+        its www folder, including uncached say_url audio
       example: 'True'
       name: Publicly Accessible Chime TTS Cache
       required: false

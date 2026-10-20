@@ -781,6 +781,124 @@ async def test_clear_cache_survives_entries_removed_from_the_live_cache(
     await clear_cache_handler(SimpleNamespace(data={"clear_temp_tts_cache": True}))
 
     assert live == {}
+async def test_issue_342_clear_www_cache_removes_uncached_say_url_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """say_url files are never recorded in storage, so clear_cache must sweep www for them."""
+    hass = FakeHass()
+    www = tmp_path / "www" / "chime_tts"
+    www.mkdir(parents=True)
+    say_url_file = www / "0123456789abcdef0123456789abcdef.mp3"
+    say_url_file.write_bytes(b"audio")
+    user_file = www / "doorbell.mp3"
+    user_file.write_bytes(b"audio")
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert not say_url_file.exists()
+    assert user_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_issue_342_www_folder_is_kept_without_clear_www_tts_cache(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The www sweep only runs when clear_www_tts_cache is requested."""
+    hass = FakeHass()
+    www = tmp_path / "www" / "chime_tts"
+    www.mkdir(parents=True)
+    say_url_file = www / "0123456789abcdef0123456789abcdef.mp3"
+    say_url_file.write_bytes(b"audio")
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_temp_tts_cache": True}))
+
+    assert say_url_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_issue_342_sweep_skips_a_shared_www_folder(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A www folder that is not chime_tts-specific (eg: the www root) is never swept."""
+    hass = FakeHass()
+    www = tmp_path / "www"
+    www.mkdir()
+    other_file = www / "0123456789abcdef0123456789abcdef.mp3"
+    other_file.write_bytes(b"audio")
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert other_file.exists()
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/config/www/chime_tts/", True),
+        ("/config/www/chime_tts", True),
+        ("/media/chime_tts/", True),
+        ("/config/www/", False),
+        ("/config/www/chime_tts/sub/", False),
+        ("/config/www/chime_tts_old/", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_integration_www_folder(path: str | None, expected: bool) -> None:
+    """Only a folder named like the default www folder counts as the integration's own."""
+    assert integration_module.is_integration_www_folder(path) is expected
+
+
+@pytest.mark.asyncio
+async def test_issue_342_sweep_skips_a_symlinked_www_folder(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A www/chime_tts symlink to a shared folder is not swept."""
+    hass = FakeHass()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    other_file = shared / "0123456789abcdef0123456789abcdef.mp3"
+    other_file.write_bytes(b"audio")
+    www = tmp_path / "www" / "chime_tts"
+    www.parent.mkdir()
+    www.symlink_to(shared, target_is_directory=True)
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert other_file.exists()
+
+
+def test_is_integration_www_folder_resolves_symlinks(tmp_path) -> None:
+    """Symlinked folders, or folders resolving to another name, do not count."""
+    real = tmp_path / "www" / "chime_tts"
+    real.mkdir(parents=True)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    link = tmp_path / "other" / "chime_tts"
+    link.parent.mkdir()
+    link.symlink_to(shared, target_is_directory=True)
+    parent_link = tmp_path / "linked_parent"
+    parent_link.symlink_to(tmp_path / "www", target_is_directory=True)
+
+    assert integration_module.is_integration_www_folder(f"{real}/") is True
+    assert integration_module.is_integration_www_folder(f"{link}/") is False
+    assert integration_module.is_integration_www_folder(f"{parent_link}/chime_tts/") is True
 
 
 @pytest.mark.asyncio
@@ -873,3 +991,39 @@ async def test_say_url_accepts_scripts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert integration_module.helpers.async_parse_params.await_args.args[1]["pre_script"] == "script.prepare_speakers"
     assert integration_module.helpers.async_parse_params.await_args.args[1]["post_script"] == "script.restore_speakers"
     assert prepare_media.await_args.args[4] is True
+
+
+async def test_issue_342_sweep_is_not_redirected_by_parent_segments(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured path like jump/../chime_tts must not sweep a linked shared folder."""
+    hass = FakeHass()
+    (tmp_path / "chime_tts").mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    other_file = shared / "0123456789abcdef0123456789abcdef.mp3"
+    other_file.write_bytes(b"audio")
+    (tmp_path / "b" / "sub").mkdir(parents=True)
+    (tmp_path / "b" / "chime_tts").symlink_to(shared, target_is_directory=True)
+    (tmp_path / "jump").symlink_to(tmp_path / "b" / "sub", target_is_directory=True)
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{tmp_path}/jump/../chime_tts/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert other_file.exists()
+
+
+def test_resolve_integration_www_folder_matches_the_os_resolution(tmp_path) -> None:
+    """The folder that passes the check is the one the OS resolves, and the one swept."""
+    (tmp_path / "chime_tts").mkdir()
+    (tmp_path / "b" / "sub").mkdir(parents=True)
+    (tmp_path / "b" / "chime_tts").mkdir()
+    (tmp_path / "jump").symlink_to(tmp_path / "b" / "sub", target_is_directory=True)
+    configured = f"{tmp_path}/jump/../chime_tts/"
+
+    assert integration_module.resolve_integration_www_folder(configured) == str(tmp_path / "b" / "chime_tts")
+    assert integration_module.resolve_integration_www_folder(f"{tmp_path}/chime_tts") == str(tmp_path / "chime_tts")
+    assert integration_module.resolve_integration_www_folder(None) is None

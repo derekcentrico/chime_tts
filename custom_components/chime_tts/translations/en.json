@@ -22,7 +22,7 @@
                 },
                 "clear_www_tts_cache": {
                     "name": "Publicly Accessible Chime TTS Cache",
-                    "description": "Remove the publicly accessible audio files stored in the Chime TTS cache"
+                    "description": "Remove the publicly accessible audio files Chime TTS saved to its www folder, including uncached say_url audio"
                 },
                 "clear_ha_tts_cache": {
                     "name": "Home Assistant TTS Cache",
