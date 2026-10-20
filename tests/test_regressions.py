@@ -5,6 +5,7 @@ unfixed code and passes after the fix.
 """
 
 import asyncio
+import contextlib
 import importlib
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -1699,6 +1700,68 @@ async def test_issue_318_ffmpeg_segment_conversion_uses_unique_temp_files(monkey
     assert saved_paths[0] != saved_paths[1]
     assert abs(len(short_out) - 400) < 100
     assert abs(len(long_out) - 1600) < 100
+
+
+async def _start_hanging_segment_conversion(monkeypatch, tmp_path):
+    """Start a segment conversion whose FFmpeg writes partial output, then hangs."""
+    from pydub.generators import Sine
+
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    real_exec = asyncio.create_subprocess_exec
+    started = asyncio.Event()
+    processes = []
+
+    async def _hanging_exec(*cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"partial")
+        process = await real_exec("sleep", "30", **kwargs)
+        processes.append(process)
+        started.set()
+        return process
+
+    monkeypatch.setattr(helpers_module.asyncio, "create_subprocess_exec", _hanging_exec)
+    task = asyncio.create_task(
+        ChimeTTSHelper().async_ffmpeg_convert_from_audio_segment(
+            _ThreadedExecHass(), Sine(440).to_audio_segment(duration=300), "-ar 16000", str(tmp_path)
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=10)
+    assert len(list(tmp_path.iterdir())) == 2
+    return task, processes
+
+
+async def test_issue_318_cancelled_conversion_removes_temp_files(monkeypatch, tmp_path):
+    """A cancelled conversion stops FFmpeg and deletes the temp source and partial output (#318)."""
+    task, processes = await _start_hanging_segment_conversion(monkeypatch, tmp_path)
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("conversion should propagate the cancellation")
+
+    assert processes[0].returncode is not None
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_issue_318_cleanup_survives_second_cancel(monkeypatch, tmp_path):
+    """A second cancel during cleanup doesn't strand the temp files (#318)."""
+    task, processes = await _start_hanging_segment_conversion(monkeypatch, tmp_path)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    for _ in range(100):
+        if processes[0].returncode is not None and not list(tmp_path.iterdir()):
+            break
+        await asyncio.sleep(0.05)
+    assert processes[0].returncode is not None
+    assert list(tmp_path.iterdir()) == []
 
 
 async def test_issue_318_delete_file_runs_in_executor(monkeypatch, tmp_path):

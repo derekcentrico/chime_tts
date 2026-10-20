@@ -722,31 +722,46 @@ class ChimeTTSHelper:
             _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to store audio segment to: %s", folder)
             return ret_val
 
-        # Convert with FFmpeg
-        converted_audio_file = await self.async_ffmpeg_convert_from_file(hass, temp_audio_file, ffmpeg_args)
-        if converted_audio_file is None or converted_audio_file is False or len(converted_audio_file) < 5:
-            _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to convert audio segment from file %s", temp_audio_file)
+        converted_audio_file = None
+        try:
+            # Convert with FFmpeg
+            converted_audio_file = await self.async_ffmpeg_convert_from_file(hass, temp_audio_file, ffmpeg_args)
+            if converted_audio_file is None or converted_audio_file is False or len(converted_audio_file) < 5:
+                _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to convert audio segment from file %s", temp_audio_file)
 
-        # Load new AudioSegment from converted file
-        else:
-            try:
-                ret_val = await filesystem_helper.async_load_audio(str(converted_audio_file))
-            except Exception as error:
-                _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to load converted audio segment from file: %s. Error: %s",
-                                str(converted_audio_file), error)
+            # Load new AudioSegment from converted file
+            else:
+                try:
+                    ret_val = await filesystem_helper.async_load_audio(str(converted_audio_file))
+                except Exception as error:
+                    _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to load converted audio segment from file: %s. Error: %s",
+                                    str(converted_audio_file), error)
+        finally:
+            # Shielded so a cancelled say call (eg: queue timeout) still removes its temp files
+            await asyncio.shield(self.async_remove_temp_files(hass, [temp_audio_file, converted_audio_file]))
 
-        # Delete temp file & converted file
-        for file_path in [temp_audio_file, converted_audio_file]:
+        return ret_val
+
+    async def async_remove_temp_files(self, hass: HomeAssistant, file_paths: list) -> None:
+        """Delete FFmpeg temp files that exist, without touching the event loop."""
+        for file_path in file_paths:
             if (file_path
                 and isinstance(file_path, str)
                 and await hass.async_add_executor_job(filesystem_helper.path_exists, file_path)):
                 try:
                     await hass.async_add_executor_job(os.remove, file_path)
                 except Exception as error:
-                    _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to delete file: %s. Error: %s",
+                    _LOGGER.warning("Unable to delete FFmpeg temp file: %s. Error: %s",
                                     str(file_path), error)
 
-        return ret_val
+    async def _async_abort_ffmpeg(self, hass: HomeAssistant, ffmpeg_process, converted_file_path: str) -> None:
+        """Stop FFmpeg and delete its partial output."""
+        try:
+            ffmpeg_process.kill()
+            await ffmpeg_process.wait()
+        except ProcessLookupError:
+            pass
+        await self.async_remove_temp_files(hass, [converted_file_path])
 
     async def async_ffmpeg_convert_from_file(self, hass: HomeAssistant, file_path: str, ffmpeg_args: str):
         """Convert audio file with FFmpeg and provided arguments."""
@@ -802,12 +817,8 @@ class ChimeTTSHelper:
             try:
                 _, error_output = await ffmpeg_process.communicate()
             except asyncio.CancelledError:
-                # Don't leave FFmpeg running if the say call is cancelled
-                try:
-                    ffmpeg_process.kill()
-                    await ffmpeg_process.wait()
-                except ProcessLookupError:
-                    pass
+                # Don't leave FFmpeg running, or its partial output on disk, if the say call is cancelled
+                await asyncio.shield(self._async_abort_ffmpeg(hass, ffmpeg_process, converted_file_path))
                 raise
 
             if ffmpeg_process.returncode != 0:
