@@ -406,3 +406,23 @@ async def test_issue_315_cast_stop_failure_still_sets_volume(
     )
 
     assert _services_called(hass) == ["media_stop", "volume_set"]
+
+
+@pytest.mark.asyncio
+async def test_issue_315_cast_guard_keeps_paused_session_for_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Cast player on the fade/pause path is not stopped even if it still reports playing (#315)."""
+    helper = MediaPlayerHelper()
+    hass = Hass()
+    monkeypatch.setattr(helper, "async_wait_until_target_volume_reached", AsyncMock())
+    cast = Player("media_player.cast", platform="cast", initial=0.2, target=0.8)
+    cast.initially_playing = True
+    helper.media_players = [cast]
+    helper.fade_audio = True
+
+    await helper.async_set_volume_for_media_players(
+        hass, [cast], "target_volume_level", 0
+    )
+
+    assert "media_stop" not in _services_called(hass)

@@ -699,6 +699,10 @@ class MediaPlayerHelper:
         """
         if media_player.platform != CAST_PLATFORM or media_player.get_state() != "playing":
             return
+        # Players on the fade/pause path are resumed afterwards. A pause that has
+        # not reported yet must not turn into a stop that loses the session.
+        if media_player in self.get_fade_in_out_media_players():
+            return
         _LOGGER.debug("Preventing Google Cast volume spike for %s", media_player.entity_id)
         try:
             await hass.services.async_call(
