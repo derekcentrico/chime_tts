@@ -248,6 +248,15 @@ async def _redirect(request: web.Request) -> web.Response:
     raise web.HTTPFound(f"/redirect/{hops - 1}")
 
 
+async def _gzip(request: web.Request) -> web.Response:
+    """Serve a gzip-encoded body regardless of what the client asked for."""
+    import gzip
+
+    request.app["accept_encoding"].append(request.headers.get("Accept-Encoding"))
+    body = gzip.compress(b"\0" * (_DOWNLOAD_LIMIT * 64))
+    return web.Response(body=body, headers={"Content-Type": "audio/mpeg", "Content-Encoding": "gzip"})
+
+
 async def _missing(request: web.Request) -> web.Response:
     """Return a 404."""
     raise web.HTTPNotFound
@@ -263,6 +272,8 @@ async def chime_server(socket_enabled: None) -> AsyncIterator[TestServer]:
     app.router.add_get("/slow", _slow)
     app.router.add_get("/redirect/{hops}", _redirect)
     app.router.add_get("/missing", _missing)
+    app.router.add_get("/gzip", _gzip)
+    app["accept_encoding"] = []
     server = TestServer(app)
     await server.start_server()
     yield server
@@ -428,3 +439,28 @@ async def test_download_chime_rejects_too_many_redirects(
     assert await helper.async_download_file(hass, url, str(tmp_path)) is None
     assert loaded == []
 
+
+
+async def test_download_chime_refuses_compressed_bodies(
+    chime_server: TestServer, download_helper, tmp_path: Path
+) -> None:
+    """A compressed body is refused before aiohttp inflates it on the loop."""
+    helper, hass, loaded = download_helper
+    url = str(chime_server.make_url("/gzip"))
+    assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+    assert loaded == []
+    assert chime_server.app["accept_encoding"] == ["identity"]
+
+
+async def test_download_chime_returns_none_when_save_fails(
+    chime_server: TestServer, download_helper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chime that downloads but cannot be saved is reported as a failure."""
+    helper, hass, _loaded = download_helper
+
+    async def failed_save(**_kwargs):
+        return None
+
+    monkeypatch.setattr(helper, "async_save_audio_to_folder", failed_save)
+    url = str(chime_server.make_url("/audio"))
+    assert await helper.async_download_file(hass, url, str(tmp_path)) is None

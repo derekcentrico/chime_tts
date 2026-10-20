@@ -359,6 +359,9 @@ class FilesystemHelper:
             audio_file_path = await self.async_save_audio_to_folder(
                 hass=hass, audio=audio_content, folder=folder, file_name=url
             )
+            if not audio_file_path:
+                _LOGGER.warning("Unable to save downloaded chime from %s", url)
+                return None
             audio_duration = float(len(audio_content) / 1000)
             return {
                 LOCAL_PATH_KEY: audio_file_path,
@@ -375,10 +378,24 @@ class FilesystemHelper:
         """
         session = async_get_clientsession(hass)
         timeout = aiohttp.ClientTimeout(total=CHIME_DOWNLOAD_TIMEOUT)
+        # Ask for an uncompressed body: aiohttp would otherwise decompress on
+        # the event loop before the size cap below ever sees the bytes.
         async with session.get(
-            url, timeout=timeout, max_redirects=CHIME_DOWNLOAD_MAX_REDIRECTS
+            url,
+            timeout=timeout,
+            max_redirects=CHIME_DOWNLOAD_MAX_REDIRECTS,
+            headers={"Accept-Encoding": "identity"},
         ) as response:
             response.raise_for_status()
+
+            content_encoding = response.headers.get("Content-Encoding", "").strip().lower()
+            if content_encoding not in ("", "identity"):
+                _LOGGER.warning(
+                    "Chime at %s was sent with Content-Encoding '%s', which is not accepted",
+                    url,
+                    content_encoding,
+                )
+                return None
 
             content_type = response.headers.get("Content-Type", "")
             media_type = content_type.split(";", 1)[0].strip().lower()
