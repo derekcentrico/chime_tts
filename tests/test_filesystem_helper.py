@@ -329,7 +329,7 @@ async def test_download_chime_success(
 
 @pytest.mark.parametrize(
     "content_type",
-    ["application/octet-stream", "AUDIO/MPEG", "Audio/Ogg; codecs=opus"],
+    ["application/octet-stream", "AUDIO/MPEG", "Audio/Ogg; codecs=opus", "application/x-audio"],
 )
 async def test_download_chime_accepts_audio_content_types(
     chime_server: TestServer, download_helper, tmp_path: Path, content_type: str
@@ -427,3 +427,4 @@ async def test_download_chime_rejects_too_many_redirects(
     url = str(chime_server.make_url("/redirect/6"))
     assert await helper.async_download_file(hass, url, str(tmp_path)) is None
     assert loaded == []
+

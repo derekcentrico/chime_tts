@@ -382,9 +382,9 @@ class FilesystemHelper:
 
             content_type = response.headers.get("Content-Type", "")
             media_type = content_type.split(";", 1)[0].strip().lower()
-            main_type, _, sub_type = media_type.partition("/")
-            # octet-stream covers servers that do not label audio (e.g. .oga)
-            if main_type != "audio" and sub_type != "octet-stream":
+            # Same rule as before, case-insensitive. octet-stream covers servers
+            # that do not label audio (e.g. .oga).
+            if "audio" not in media_type and "octet-stream" not in media_type:
                 _LOGGER.warning(
                     "Unable to extract audio from URL with content-type '%s'",
                     str(content_type),
