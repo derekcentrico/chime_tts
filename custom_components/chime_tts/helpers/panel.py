@@ -574,6 +574,8 @@ class ChimeTTSPanelChimeSetOffsetPreviewView(HomeAssistantView):
             chime_path = await filesystem_helper.async_validate_path(hass, chime_path)
             if not chime_path:
                 raise FileNotFoundError(chime_value)
+            if not _is_supported_audio_upload(chime_path):
+                raise ValueError("only audio files can be previewed")
             sample_path = Path(__file__).resolve().parent.parent / "panel" / "tts_audio.mp3"
             audio_bytes = await hass.async_add_executor_job(
                 _render_chime_set_offset_preview, chime_path, sample_path, offset

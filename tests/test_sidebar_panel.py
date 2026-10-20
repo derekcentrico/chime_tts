@@ -2239,3 +2239,56 @@ def test_custom_chimes_browser_only_mutates_inside_chimes_folder(tmp_path: Path)
     assert renamed.exists()
     settings_module.delete_browser_entry(hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(renamed))
     assert not renamed.exists()
+
+
+def test_browser_refuses_to_delete_or_rename_a_browse_root(tmp_path: Path) -> None:
+    """Configured roots such as the media folder must survive the browser."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    for field_key, root in (
+        (TEMP_PATH_KEY, paths["media_dir"]),
+        (WWW_PATH_KEY, paths["www_dir"]),
+    ):
+        with pytest.raises(PermissionError):
+            settings_module.delete_browser_entry(hass, config_entry, field_key, str(root))
+        with pytest.raises(PermissionError):
+            settings_module.rename_browser_entry(hass, config_entry, field_key, str(root), "moved")
+        assert root.exists()
+
+
+def test_custom_chimes_browser_deletes_symlink_not_target(tmp_path: Path) -> None:
+    """A link inside the chimes folder is judged by its location and removed alone."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    target = paths["config_dir"] / "secrets.yaml"
+    target.write_text("api_key: hunter2\n")
+    link = paths["custom_chimes_dir"] / "link.mp3"
+    link.symlink_to(target)
+
+    settings_module.delete_browser_entry(hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(link))
+
+    assert not link.is_symlink()
+    assert target.read_text() == "api_key: hunter2\n"
+
+
+async def test_chime_set_offset_preview_refuses_non_audio_files(tmp_path: Path, monkeypatch) -> None:
+    """The offset preview must not feed arbitrary files to FFmpeg."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    secret = paths["config_dir"] / "secrets.yaml"
+    secret.write_text("api_key: hunter2\n")
+
+    async def fake_get_chime_path(chime_path, *_args):
+        return chime_path
+
+    async def fake_validate_path(_hass, path):
+        return path
+
+    rendered: list[str] = []
+    monkeypatch.setattr(panel_module.filesystem_helper, "async_get_chime_path", fake_get_chime_path)
+    monkeypatch.setattr(panel_module.filesystem_helper, "async_validate_path", fake_validate_path)
+    monkeypatch.setattr(
+        panel_module, "_render_chime_set_offset_preview", lambda path, *_a: rendered.append(path) or b""
+    )
+
+    request = _FakeRequest(hass, {"value": str(secret), "offset": "0"}, is_admin=True)
+    with pytest.raises(panel_module.web.HTTPBadRequest):
+        await panel_module.ChimeTTSPanelChimeSetOffsetPreviewView().get(request)
+    assert rendered == []

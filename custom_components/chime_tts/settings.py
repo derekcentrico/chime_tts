@@ -2507,19 +2507,30 @@ def _is_path_mutable_for_field(
     values: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether a path may be renamed or deleted from the browser."""
-    if field_key != CUSTOM_CHIMES_PATH_KEY:
-        return _is_path_within_browser_roots(hass, config_entry, field_key, path, values)
-
-    # The custom chimes picker can browse the whole filesystem, so destructive
-    # actions stay inside the configured chimes folder.
+    normalized_path = str(path or "").rstrip("/") or "/"
+    # Judge a symlink by where it lives, not by its target: removing it only
+    # removes the link.
+    located_path = os.path.join(
+        os.path.realpath(os.path.dirname(normalized_path) or "/"),
+        os.path.basename(normalized_path),
+    )
     current_values = values or get_settings_data(hass, config_entry)
-    chimes_root = _normalize_string(current_values.get(CUSTOM_CHIMES_PATH_KEY)).rstrip("/")
-    if not chimes_root or not os.path.isabs(chimes_root):
-        return False
-    resolved_root = os.path.realpath(chimes_root)
-    resolved_path = os.path.realpath(str(path or "").rstrip("/") or "/")
-    return resolved_path != resolved_root and _is_subdirectory(resolved_root, resolved_path)
 
+    if field_key == CUSTOM_CHIMES_PATH_KEY:
+        # The custom chimes picker can browse the whole filesystem, so
+        # destructive actions stay inside the configured chimes folder.
+        chimes_root = _normalize_string(current_values.get(CUSTOM_CHIMES_PATH_KEY)).rstrip("/")
+        if not chimes_root or not os.path.isabs(chimes_root):
+            return False
+        roots = [chimes_root]
+    else:
+        roots = get_browse_roots(hass, config_entry, field_key, current_values)
+
+    for root in roots:
+        resolved_root = os.path.realpath(root.rstrip("/") or "/")
+        if located_path != resolved_root and _is_subdirectory(resolved_root, located_path):
+            return True
+    return False
 
 def resolve_browser_audio_file_path(
     hass,
