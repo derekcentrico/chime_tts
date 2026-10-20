@@ -127,7 +127,7 @@ def test_issue_339_pre_resolved_external_chime_is_loaded(monkeypatch):
     monkeypatch.setattr(
         integration.filesystem_helper, "async_get_chime_path", resolve_again
     )
-    monkeypatch.setattr(integration.filesystem_helper, "delete_file", lambda *_: None)
+    monkeypatch.setattr(integration.filesystem_helper, "async_delete_file", AsyncMock())
 
     result = asyncio.run(
         integration.async_get_audio_from_path(
@@ -1585,3 +1585,163 @@ def test_issue_303_fallback_audio_is_cached_when_opted_in(monkeypatch):
         cache_fallback=True,
     )
     assert add_to_cache.await_count > 0
+
+
+class _ThreadedExecHass:
+    """Hass stand-in that runs executor jobs on a worker thread."""
+
+    def __init__(self):
+        from types import SimpleNamespace
+
+        self.config = SimpleNamespace(external_url="http://ha.local")
+
+    async def async_add_executor_job(self, func, *args):
+        return await asyncio.get_running_loop().run_in_executor(None, func, *args)
+
+
+def _track_off_loop(monkeypatch, target, name, prefix):
+    """Wrap target.name and record, per call under prefix, whether it ran off the loop thread."""
+    import threading
+
+    loop_thread = threading.get_ident()
+    original = getattr(target, name)
+    calls = []
+
+    def _tracked(*args, **kwargs):
+        if args and str(args[0]).startswith(prefix):
+            calls.append(threading.get_ident() != loop_thread)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, _tracked)
+    return calls
+
+
+def _write_tone(path, duration_ms=1000):
+    from pydub.generators import Sine
+
+    Sine(440).to_audio_segment(duration=duration_ms).set_frame_rate(44100).export(str(path), format="mp3")
+    return str(path)
+
+
+async def test_issue_318_ffmpeg_conversion_does_not_block_event_loop(monkeypatch, tmp_path):
+    """FFmpeg conversion runs as an async subprocess, not a blocking Popen.communicate (#318)."""
+    import subprocess
+
+    from pydub import AudioSegment
+
+    def _blocking_communicate(*_args, **_kwargs):
+        raise AssertionError("Popen.communicate blocks the event loop")
+
+    source = _write_tone(tmp_path / "source.mp3")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess.Popen, "communicate", _blocking_communicate)
+        result = await ChimeTTSHelper().async_ffmpeg_convert_from_file(_ThreadedExecHass(), source, "-ar 16000")
+
+    assert result == source
+    assert AudioSegment.from_file(source).frame_rate == 16000
+    assert not (tmp_path / "source_converted.mp3").exists()
+
+
+async def test_issue_318_ffmpeg_file_cleanup_runs_in_executor(monkeypatch, tmp_path):
+    """os.remove and shutil.move in the FFmpeg helpers go through the executor (#318)."""
+    from pydub.generators import Sine
+
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    removes = _track_off_loop(monkeypatch, helpers_module.os, "remove", str(tmp_path))
+    moves = _track_off_loop(monkeypatch, helpers_module.shutil, "move", str(tmp_path))
+    # A stale converted file forces the pre-conversion delete path.
+    (tmp_path / "source_converted.mp3").write_bytes(b"stale")
+    source = _write_tone(tmp_path / "source.mp3")
+    hass = _ThreadedExecHass()
+    helper = ChimeTTSHelper()
+
+    assert await helper.async_ffmpeg_convert_from_file(hass, source, "-ar 16000") == source
+    converted = await helper.async_ffmpeg_convert_from_audio_segment(
+        hass, Sine(440).to_audio_segment(duration=500), "-ar 16000", str(tmp_path)
+    )
+
+    assert converted.frame_rate == 16000
+    assert removes and all(removes)
+    assert moves and all(moves)
+    # Temp segment files are cleaned up afterwards.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["source.mp3"]
+
+
+async def test_issue_318_ffmpeg_segment_conversion_uses_unique_temp_files(monkeypatch, tmp_path):
+    """Concurrent segment conversions write separate temp files instead of a shared name (#318)."""
+    from pydub.generators import Sine
+
+    from custom_components.chime_tts.helpers import helpers as helpers_module
+
+    fs = helpers_module.filesystem_helper
+    original_save = fs.async_save_audio_to_folder
+    saved_paths = []
+
+    async def _tracked_save(*args, **kwargs):
+        path = await original_save(*args, **kwargs)
+        saved_paths.append(path)
+        return path
+
+    monkeypatch.setattr(fs, "async_save_audio_to_folder", _tracked_save)
+    hass = _ThreadedExecHass()
+    helper = ChimeTTSHelper()
+    short_audio = Sine(440).to_audio_segment(duration=400)
+    long_audio = Sine(440).to_audio_segment(duration=1600)
+
+    short_out, long_out = await asyncio.gather(
+        helper.async_ffmpeg_convert_from_audio_segment(hass, short_audio, "-ar 16000", str(tmp_path)),
+        helper.async_ffmpeg_convert_from_audio_segment(hass, long_audio, "-ar 16000", str(tmp_path)),
+    )
+
+    assert len(saved_paths) == 2
+    assert saved_paths[0] != saved_paths[1]
+    assert abs(len(short_out) - 400) < 100
+    assert abs(len(long_out) - 1600) < 100
+
+
+async def test_issue_318_delete_file_runs_in_executor(monkeypatch, tmp_path):
+    """async_delete_file removes the file from a worker thread (#318)."""
+    from custom_components.chime_tts.helpers import filesystem as filesystem_module
+
+    helper = filesystem_module.FilesystemHelper()
+    removes = _track_off_loop(monkeypatch, filesystem_module.os, "remove", str(tmp_path))
+    target = tmp_path / "temp.mp3"
+    target.write_bytes(b"x")
+
+    await helper.async_delete_file(_ThreadedExecHass(), str(target))
+
+    assert not target.exists()
+    assert removes == [True]
+
+
+async def test_issue_318_cached_audio_removal_deletes_off_loop(monkeypatch):
+    """Cache cleanup in the integration routes delete_file through the executor (#318)."""
+    import threading
+
+    from custom_components.chime_tts.const import LOCAL_PATH_KEY, PUBLIC_PATH_KEY, TEMP_PATH_KEY
+
+    integration = importlib.import_module("custom_components.chime_tts")
+    loop_thread = threading.get_ident()
+    deletes = []
+
+    monkeypatch.setitem(integration._data, TEMP_PATH_KEY, "/media/temp")
+    monkeypatch.setattr(
+        integration,
+        "async_retrieve_data",
+        AsyncMock(return_value={LOCAL_PATH_KEY: "/media/temp/a.mp3", PUBLIC_PATH_KEY: "/config/www/a.mp3"}),
+    )
+    monkeypatch.setattr(integration, "async_delete_data", AsyncMock())
+    monkeypatch.setattr(integration.filesystem_helper, "async_file_exists_in_directory", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        integration.filesystem_helper,
+        "delete_file",
+        lambda _hass, path: deletes.append((path, threading.get_ident() != loop_thread)),
+    )
+
+    await integration.async_remove_cached_audio_data(
+        _ThreadedExecHass(), "key", clear_temp_tts_cache=True, clear_www_tts_cache=True
+    )
+
+    assert deletes == [("/media/temp/a.mp3", True), ("/config/www/a.mp3", True)]

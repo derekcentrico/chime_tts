@@ -500,7 +500,7 @@ def test_combine_audio_applies_overlay(helper: ChimeTTSHelper) -> None:
 async def test_ffmpeg_convert_skips_alexa_compatible_files(monkeypatch: pytest.MonkeyPatch, helper: ChimeTTSHelper) -> None:
     """Alexa-compatible MP3s should not be converted again."""
     hass = FakeHass()
-    popen = AsyncMock()
+    create_subprocess = AsyncMock()
 
     monkeypatch.setattr(
         helpers_module.filesystem_helper,
@@ -510,12 +510,12 @@ async def test_ffmpeg_convert_skips_alexa_compatible_files(monkeypatch: pytest.M
     monkeypatch.setattr(helpers_module.os.path, "isfile", lambda path: True)
     monkeypatch.setattr(helpers_module.filesystem_helper, "path_exists", lambda path: True)
     monkeypatch.setattr(helpers_module.filesystem_helper, "async_is_audio_alexa_compatible", AsyncMock(return_value=True))
-    monkeypatch.setattr(helpers_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(helpers_module.asyncio, "create_subprocess_exec", create_subprocess)
 
     result = await helper.async_ffmpeg_convert_from_file(hass, "media.mp3", FFMPEG_ARGS_ALEXA)
 
     assert result == "media.mp3"
-    popen.assert_not_called()
+    create_subprocess.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -524,18 +524,20 @@ async def test_ffmpeg_convert_uses_requested_output_format(monkeypatch: pytest.M
     hass = FakeHass()
     commands: list[list[str]] = []
 
-    class FakePopen:
-        """Capture subprocess commands without running FFmpeg."""
+    class FakeProcess:
+        """Emulate a successful FFmpeg process."""
 
-        def __init__(self, command, stdin=None, stdout=None, stderr=None):
-            """Store the command and emulate a successful process."""
-            del stdin, stdout, stderr
-            commands.append(command)
-            self.returncode = 0
+        returncode = 0
 
-        def communicate(self):
+        async def communicate(self):
             """Return an empty stderr payload."""
             return b"", b""
+
+    async def fake_create_subprocess_exec(*command, stdin=None, stdout=None, stderr=None):
+        """Capture subprocess commands without running FFmpeg."""
+        del stdin, stdout, stderr
+        commands.append(list(command))
+        return FakeProcess()
 
     monkeypatch.setattr(
         helpers_module.filesystem_helper,
@@ -544,7 +546,7 @@ async def test_ffmpeg_convert_uses_requested_output_format(monkeypatch: pytest.M
     )
     monkeypatch.setattr(helpers_module.os.path, "isfile", lambda path: True)
     monkeypatch.setattr(helpers_module.filesystem_helper, "path_exists", lambda path: False)
-    monkeypatch.setattr(helpers_module.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(helpers_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
     result = await helper.async_ffmpeg_convert_from_file(hass, "media.mp3", "-f wav -ar 16000")
 

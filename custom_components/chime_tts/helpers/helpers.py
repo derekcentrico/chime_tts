@@ -1,9 +1,10 @@
 """Audio helper functions for Chime TTS."""
 
+import asyncio
+from asyncio.subprocess import PIPE
 import logging
 import os
 import re
-import subprocess
 import shutil
 import yaml
 from .media_player_helper import MediaPlayerHelper
@@ -712,16 +713,13 @@ class ChimeTTSHelper:
             _LOGGER.warning("Skipping FFmpeg conversion: %s", error_string)
             return ret_val
 
-        # Save to temp file
-        temp_filename = "temp_segment.mp3"
+        # Save to a uniquely named temp file so concurrent conversions don't collide
         temp_audio_file = await filesystem_helper.async_save_audio_to_folder(
             hass=hass,
             audio=audio_segment,
-            folder=folder,
-            file_name=temp_filename)
+            folder=folder)
         if not temp_audio_file:
-            full_path = f"{folder}/{temp_filename}"
-            _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to store audio segment to: %s", full_path)
+            _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to store audio segment to: %s", folder)
             return ret_val
 
         # Convert with FFmpeg
@@ -743,7 +741,7 @@ class ChimeTTSHelper:
                 and isinstance(file_path, str)
                 and await hass.async_add_executor_job(filesystem_helper.path_exists, file_path)):
                 try:
-                    os.remove(file_path)
+                    await hass.async_add_executor_job(os.remove, file_path)
                 except Exception as error:
                     _LOGGER.warning("ffmpeg_convert_from_audio_segment - Unable to delete file: %s. Error: %s",
                                     str(file_path), error)
@@ -790,19 +788,27 @@ class ChimeTTSHelper:
 
             # Delete converted output file if it exists
             if await hass.async_add_executor_job(filesystem_helper.path_exists, converted_file_path):
-                os.remove(converted_file_path)
+                await hass.async_add_executor_job(os.remove, converted_file_path)
 
             ffmpeg_cmd.append(converted_file_path)
 
             # Convert the audio file
             ffmpeg_cmd_string = " ".join(ffmpeg_cmd)
             _LOGGER.debug("Running FFmpeg operation: \"%s\"", ffmpeg_cmd_string)
-            ffmpeg_process = subprocess.Popen(ffmpeg_cmd,
-                                              stdin=subprocess.PIPE,
-                                              stdout=subprocess.PIPE,
-                                              stderr=subprocess.PIPE)
-            _, error_output = ffmpeg_process.communicate()
-
+            ffmpeg_process = await asyncio.create_subprocess_exec(*ffmpeg_cmd,
+                                                                  stdin=PIPE,
+                                                                  stdout=PIPE,
+                                                                  stderr=PIPE)
+            try:
+                _, error_output = await ffmpeg_process.communicate()
+            except asyncio.CancelledError:
+                # Don't leave FFmpeg running if the say call is cancelled
+                try:
+                    ffmpeg_process.kill()
+                    await ffmpeg_process.wait()
+                except ProcessLookupError:
+                    pass
+                raise
 
             if ffmpeg_process.returncode != 0:
                 error_message = error_output.decode('utf-8')
@@ -815,17 +821,13 @@ class ChimeTTSHelper:
             # Replace original with converted file
             if converted_file_path == local_file_path.replace(".mp3", "_converted.mp3"):
                 try:
-                    shutil.move(converted_file_path, local_file_path)
+                    await hass.async_add_executor_job(shutil.move, converted_file_path, local_file_path)
                 except Exception as error:
                     _LOGGER.error("Error renaming file %s to %s. Error: %s. FFmpeg options: %s",
                                    local_file_path, converted_file_path, error, ffmpeg_cmd_string)
                     return False
 
             return file_path
-
-        except subprocess.CalledProcessError as error:
-            _LOGGER.error("FFmpeg subproces error: %s FFmpeg options: %s",
-                           error, ffmpeg_cmd_string)
 
         except Exception as error:
             _LOGGER.error("FFmpeg unexpected error: %s FFmpeg options: %s",
