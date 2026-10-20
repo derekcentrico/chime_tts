@@ -52,7 +52,7 @@
                 },
                 "initial_delay": {
                     "name": "Initial Delay",
-                    "description": "Initial delay (in milliseconds) added to the start of the audio"
+                    "description": "Initial delay (in milliseconds) added to the start of the audio. When unset, Google Cast speakers get 2000 ms of leading silence to avoid clipping; set to 0 to disable"
                 },
                 "final_delay": {
                     "name": "Final Delay",

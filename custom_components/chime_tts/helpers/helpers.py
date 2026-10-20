@@ -18,6 +18,9 @@ from ..const import (
     OFFSET_KEY,
     CROSSFADE_KEY,
     INITIAL_DELAY_KEY,
+    CAST_LEADING_SILENCE_KEY,
+    CAST_PLATFORM,
+    DEFAULT_CAST_LEADING_SILENCE_MS,
     TTS_PLATFORM_KEY,
     DEFAULT_LANGUAGE_KEY,
     DEFAULT_VOICE_KEY,
@@ -234,6 +237,19 @@ class ChimeTTSHelper:
         if len(media_players_array) == 0 and is_say_url is False:
             return None
 
+        # Pad Cast targets unless an initial delay is already in effect. Passing
+        # initial_delay (including 0) on the call opts out.
+        cast_leading_silence = 0
+        if (
+            data.get(INITIAL_DELAY_KEY) in (None, "")
+            and initial_delay == 0
+            and any(
+                getattr(media_player, "platform", None) == CAST_PLATFORM
+                for media_player in media_players_array
+            )
+        ):
+            cast_leading_silence = DEFAULT_CAST_LEADING_SILENCE_MS
+
         # FFmpeg arguments
         ffmpeg_args: str = self.parse_ffmpeg_args(data.get("audio_conversion", None))
 
@@ -246,6 +262,7 @@ class ChimeTTSHelper:
             "offset": offset,
             "crossfade": crossfade,
             "initial_delay": initial_delay,
+            CAST_LEADING_SILENCE_KEY: cast_leading_silence,
             "final_delay": final_delay,
             "message": message,
             "language": language,

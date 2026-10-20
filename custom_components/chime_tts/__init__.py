@@ -110,6 +110,7 @@ from .const import (
     DEFAULT_OFFSET_MS,
     CROSSFADE_KEY,
     INITIAL_DELAY_KEY,
+    CAST_LEADING_SILENCE_KEY,
     CHIME_SETS_KEY,
     CHIME_OFFSETS_KEY,
     DEFAULT_CHIME_OFFSETS,
@@ -960,6 +961,29 @@ def _repeat_audio_segment(
     return repeated_audio
 
 
+def _prepend_silence(audio_segment: AudioSegment, duration_ms: float) -> AudioSegment:
+    """Prepend leading silence to audio."""
+    return AudioSegment.silent(duration=duration_ms) + audio_segment
+
+
+async def async_add_cast_leading_silence(
+    hass: HomeAssistant, audio_segment: AudioSegment, audio_file: str, params: dict
+) -> AudioSegment:
+    """Pad the start of the audio for Cast receivers and rewrite the file."""
+    cast_leading_silence = params.get(CAST_LEADING_SILENCE_KEY, 0) or 0
+    if cast_leading_silence <= 0:
+        return audio_segment
+    _LOGGER.debug(
+        " - Adding %sms of leading silence for Google Cast playback",
+        cast_leading_silence,
+    )
+    audio_segment = await hass.async_add_executor_job(
+        _prepend_silence, audio_segment, cast_leading_silence
+    )
+    await filesystem_helper.async_export_audio(audio_segment, audio_file)
+    return audio_segment
+
+
 async def async_get_playback_audio_path(params: dict, options: dict):
     """Create audio to play on media player entity."""
     output_audio = None
@@ -1127,6 +1151,11 @@ async def async_get_playback_audio_path(params: dict, options: dict):
                 total_plays,
                 len(new_audio_segment) / 1000,
             )
+
+        # Added after the repeat so it precedes the first play only.
+        new_audio_segment = await async_add_cast_leading_silence(
+            hass, new_audio_segment, new_audio_file, params
+        )
 
         duration = len(new_audio_segment) / 1000.0
         audio_dict[AUDIO_DURATION_KEY] = duration
@@ -2247,6 +2276,12 @@ def get_filename_hash_from_service_data(params: dict, options: dict):
         has_additional_repeats = False
     if has_additional_repeats:
         unique_string += "-repeat-semantics-additional-plays-v1"
+
+    # Labelled so it never collides with an equal initial_delay, which is
+    # repeated per play rather than added once.
+    cast_leading_silence = params.get(CAST_LEADING_SILENCE_KEY, 0)
+    if cast_leading_silence:
+        unique_string += f"-cast-leading-silence-{cast_leading_silence}"
 
     hash_value = filesystem_helper.get_hash_for_string(unique_string)
     return hash_value
