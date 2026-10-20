@@ -20,7 +20,7 @@ from homeassistant.components.media_player.const import (
 )
 
 from .helpers.helpers import ChimeTTSHelper
-from .helpers.media_player_helper import (MediaPlayerHelper, ChimeTTSMediaPlayer)
+from .helpers.media_player_helper import (MediaPlayerHelper, ChimeTTSMediaPlayer, is_valid_announce_volume)
 from .helpers.filesystem import FilesystemHelper
 from .helpers.panel import async_setup_panel
 from .helpers.panel_logs import (
@@ -1703,14 +1703,14 @@ def _sonos_volume_set_call(entity_id, volume_percent: int):
         "delay_after": SONOS_VOLUME_SETTLE_MS,
     }
 
-def _squeezebox_extra(extra: dict | None, volume_level: float, announce: bool | None) -> dict:
+def _squeezebox_extra(extra: dict | None, volume_level: float | None, announce: bool | None) -> dict:
     """Build the Squeezebox play_media `extra`, adding the announcement volume.
 
-    Squeezebox rejects an `announce_volume` outside (0, 1], so 0 and the -1
-    "no target" sentinel leave it out.
+    Squeezebox rejects an `announce_volume` outside (0, 1], so 0, None and the
+    -1 "no target" sentinel leave it out.
     """
     squeezebox_extra = dict(extra) if extra else {}
-    if announce and 0 < volume_level <= 1:
+    if announce and is_valid_announce_volume(volume_level):
         squeezebox_extra[SQUEEZEBOX_ATTR_ANNOUNCE_VOLUME] = volume_level
     return squeezebox_extra
 
@@ -1986,7 +1986,7 @@ async def async_post_playback_actions(hass: HomeAssistant,
     # Wait for playback to end on all media_players
     playing_media_players: list[ChimeTTSMediaPlayer] = []
     for media_player in media_players_array:
-        if not(media_player_helper.announce and (media_player.platform == SPOTIFY_PLATFORM or media_player.platform == SONOS_PLATFORM)) and not media_player_helper.get_resumes_after_announce(media_player):
+        if not(media_player_helper.announce and (media_player.platform == SPOTIFY_PLATFORM or media_player.platform == SONOS_PLATFORM)):
             playing_media_players.append(media_player)
     if not await media_player_helper.async_wait_until_media_players_state_not(hass, playing_media_players, "playing"):
         _LOGGER.debug(" - Timed out waiting for playback to complete")

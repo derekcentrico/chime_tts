@@ -30,6 +30,15 @@ from ..config import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def is_valid_announce_volume(volume_level) -> bool:
+    """Whether Squeezebox accepts the level as `announce_volume`, which must be in (0, 1]."""
+    return (
+        isinstance(volume_level, int | float)
+        and not isinstance(volume_level, bool)
+        and 0 < volume_level <= 1
+    )
+
+
 class MediaPlayerHelper:
     """Media player helper functions for Chime TTS."""
 
@@ -193,31 +202,20 @@ class MediaPlayerHelper:
 
         Squeezebox applies `extra.announce_volume` for the announcement only and
         restores the previous level afterwards, so no volume_set is needed. Only
-        true when an `announce_volume` is actually sent for this player's level:
-        a target of 0 or none falls back to volume_set, and a joined member only
-        qualifies if the leader's announcement carries the same level.
+        true when an `announce_volume` is actually sent for this player's level,
+        so a target of 0 or none falls back to volume_set. Joined members always
+        use volume_set: only the leader receives play_media, and LMS does not
+        sync volume across a group by default.
         """
         if not (
-            self.get_resumes_after_announce(media_player)
-            and 0 < media_player.target_volume_level <= 1
-        ):
-            return False
-        leader = self.get_join_leader()
-        if leader is None or leader is media_player or not media_player.join_supported:
-            return True
-        return (
-            leader.platform == SQUEEZEBOX_PLATFORM
-            and leader.target_volume_level == media_player.target_volume_level
-            and self.get_uses_announce_volume(leader)
-        )
-
-    def get_resumes_after_announce(self, media_player: ChimeTTSMediaPlayer) -> bool:
-        """Whether a Squeezebox returns to its previous state after the announcement."""
-        return bool(
             self.announce
             and media_player.announce_supported
             and media_player.platform == SQUEEZEBOX_PLATFORM
-        )
+            and is_valid_announce_volume(media_player.target_volume_level)
+        ):
+            return False
+        leader = self.get_join_leader()
+        return leader is None or leader is media_player or not media_player.join_supported
 
     def get_join_leader(self) -> ChimeTTSMediaPlayer | None:
         """Player that will lead the speaker group, or None when not joining.

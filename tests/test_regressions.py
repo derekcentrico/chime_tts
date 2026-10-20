@@ -2366,9 +2366,51 @@ def test_issue_309_squeezebox_zero_or_unset_target_keeps_volume_set(monkeypatch)
     assert helper.get_uses_announce_volume(usable) is True
     # -1 means "leave the volume alone", so only the explicit 0 is set and restored
     assert helper.get_set_volume_media_players() == [zero]
-    # The announcement still restores the prior state, so no wait for "playing" to end
-    assert helper.get_resumes_after_announce(zero) is True
-    assert helper.get_resumes_after_announce(unset) is True
+
+
+async def test_issue_309_squeezebox_none_target_does_not_raise(monkeypatch):
+    """A None target is treated as unset rather than raising TypeError."""
+    from custom_components.chime_tts.helpers.media_player_helper import (
+        is_valid_announce_volume,
+    )
+
+    missing = _squeezebox_player("media_player.kitchen", None)
+    integration, helper = _squeezebox_helper(monkeypatch, [missing])
+
+    assert helper.get_uses_announce_volume(missing) is False
+    assert is_valid_announce_volume(None) is False
+    assert is_valid_announce_volume(True) is False
+    calls = await integration.async_prepare_media_service_calls(
+        None, ["media_player.kitchen"], _squeezebox_service_data(), {}
+    )
+    assert "extra" not in calls[0]["service_data"]
+
+
+async def test_issue_309_squeezebox_waits_for_announcement_to_finish(monkeypatch):
+    """Cleanup waits for Squeezebox playback to end so restore and unjoin do not race it."""
+    import pytest
+
+    integration, helper = _squeezebox_helper(
+        monkeypatch, [_squeezebox_player("media_player.kitchen", 0.4)]
+    )
+    waited = []
+
+    class _Stop(Exception):
+        pass
+
+    async def _fake_wait(hass, media_players, state):
+        waited.extend(media_players)
+        raise _Stop
+
+    class _Hass:
+        async def async_add_executor_job(self, func, *args):
+            return None
+
+    monkeypatch.setattr(helper, "async_wait_until_media_players_state_not", _fake_wait)
+    with pytest.raises(_Stop):
+        await integration.async_post_playback_actions(_Hass(), 0, 0, helper.media_players)
+
+    assert [p.entity_id for p in waited] == ["media_player.kitchen"]
 
 
 async def test_issue_309_squeezebox_unset_target_not_batched_with_explicit(monkeypatch):
@@ -2389,8 +2431,8 @@ async def test_issue_309_squeezebox_unset_target_not_batched_with_explicit(monke
     assert "extra" not in by_entity["media_player.porch"]
 
 
-def test_issue_309_squeezebox_joined_member_with_own_level_keeps_volume_set(monkeypatch):
-    """A member whose level differs from the leader's announcement is volume_set."""
+def test_issue_309_squeezebox_joined_members_always_volume_set(monkeypatch):
+    """Only the leader gets play_media and LMS does not sync volume, so members are volume_set."""
     leader = _squeezebox_player("media_player.kitchen", 0.5, join_supported=True)
     same = _squeezebox_player("media_player.office", 0.5, join_supported=True)
     differs = _squeezebox_player("media_player.garage", 0.7, join_supported=True)
@@ -2401,11 +2443,11 @@ def test_issue_309_squeezebox_joined_member_with_own_level_keeps_volume_set(monk
 
     assert helper.get_join_leader() is leader
     assert helper.get_uses_announce_volume(leader) is True
-    assert helper.get_uses_announce_volume(same) is True
+    assert helper.get_uses_announce_volume(same) is False
     assert helper.get_uses_announce_volume(differs) is False
     # Not joinable, so it plays on its own call with its own announce_volume
     assert helper.get_uses_announce_volume(solo) is True
-    assert helper.get_set_volume_media_players() == [differs]
+    assert helper.get_set_volume_media_players() == [same, differs]
 
 
 def test_issue_309_squeezebox_members_volume_set_when_leader_sends_none(monkeypatch):
