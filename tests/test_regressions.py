@@ -2183,9 +2183,6 @@ async def test_issue_318_segment_conversion_to_other_format_leaves_no_files(tmp_
     assert list(tmp_path.iterdir()) == []
 
 
-def _squeezebox_player(entity_id, volume, platform="squeezebox", announce_supported=True):
-
-
 def _squeezebox_player(
     entity_id, volume, platform="squeezebox", announce_supported=True, join_supported=False
 ):
