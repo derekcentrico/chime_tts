@@ -464,3 +464,23 @@ async def test_download_chime_returns_none_when_save_fails(
     monkeypatch.setattr(helper, "async_save_audio_to_folder", failed_save)
     url = str(chime_server.make_url("/audio"))
     assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+
+
+async def test_download_chime_does_not_inflate_on_the_loop(
+    chime_server: TestServer, download_helper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """aiohttp must not decompress the body, even when the server ignores Accept-Encoding."""
+    import zlib
+
+    helper, hass, _loaded = download_helper
+    inflated: list[int] = []
+    real_decompressobj = zlib.decompressobj
+
+    def tracking_decompressobj(*args, **kwargs):
+        inflated.append(1)
+        return real_decompressobj(*args, **kwargs)
+
+    monkeypatch.setattr(zlib, "decompressobj", tracking_decompressobj)
+    url = str(chime_server.make_url("/gzip"))
+    assert await helper.async_download_file(hass, url, str(tmp_path)) is None
+    assert inflated == []

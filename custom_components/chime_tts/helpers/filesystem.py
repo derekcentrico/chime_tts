@@ -2,6 +2,8 @@
 
 import logging
 import secrets
+import inspect
+from typing import Any
 import os
 import hashlib
 import shutil
@@ -52,6 +54,12 @@ _AUDIO_EXTENSIONS = [
     ".ape",
     ".oga",
 ]
+
+
+# Per-request auto_decompress is missing from older aiohttp releases.
+_REQUEST_SUPPORTS_AUTO_DECOMPRESS = "auto_decompress" in inspect.signature(
+    aiohttp.ClientSession._request
+).parameters
 
 
 class FilesystemHelper:
@@ -378,14 +386,17 @@ class FilesystemHelper:
         """
         session = async_get_clientsession(hass)
         timeout = aiohttp.ClientTimeout(total=CHIME_DOWNLOAD_TIMEOUT)
-        # Ask for an uncompressed body: aiohttp would otherwise decompress on
-        # the event loop before the size cap below ever sees the bytes.
-        async with session.get(
-            url,
-            timeout=timeout,
-            max_redirects=CHIME_DOWNLOAD_MAX_REDIRECTS,
-            headers={"Accept-Encoding": "identity"},
-        ) as response:
+        # Never let aiohttp inflate the body: it would do so on the event loop
+        # before the size cap below sees the bytes. Compressed bodies are
+        # refused instead.
+        request_kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "max_redirects": CHIME_DOWNLOAD_MAX_REDIRECTS,
+            "headers": {"Accept-Encoding": "identity"},
+        }
+        if _REQUEST_SUPPORTS_AUTO_DECOMPRESS:
+            request_kwargs["auto_decompress"] = False
+        async with session.get(url, **request_kwargs) as response:
             response.raise_for_status()
 
             content_encoding = response.headers.get("Content-Encoding", "").strip().lower()
