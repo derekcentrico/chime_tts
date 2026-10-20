@@ -2537,10 +2537,12 @@ async def test_issue_353_read_only_configuration_yaml_reports_clear_error(
     config_file = paths["config_dir"].joinpath("configuration.yaml")
     original = _write_profile_config(config_file)
 
-    def read_only_mkstemp(*args, **kwargs):
+    def read_only(*args, **kwargs):
         raise OSError(errno.EROFS, "Read-only file system")
 
-    monkeypatch.setattr(settings_module.tempfile, "mkstemp", read_only_mkstemp)
+    # A read-only mount fails both the temp file and the in-place fallback.
+    monkeypatch.setattr(settings_module.tempfile, "mkstemp", read_only)
+    monkeypatch.setattr(settings_module, "_write_text_in_place", read_only)
     values = dict(config_entry.options)
     values[INITIAL_DELAY_KEY] = 250
     connection = FakeConnection()
@@ -2594,3 +2596,152 @@ def test_issue_353_read_only_file_mode_is_not_replaced(tmp_path: Path) -> None:
         config_file.chmod(0o644)
     assert config_file.read_text(encoding="utf-8") == original
     assert _config_dir_files(paths["config_dir"]) == ["configuration.yaml"]
+
+
+def _save_arrival_profile(hass) -> None:
+    """Save a single notify profile through the configuration.yaml writer."""
+    settings_module.save_notify_profiles(
+        hass, [{"name": "arrival", "entity_id": "media_player.kitchen"}]
+    )
+
+
+def _saved_profile_names(config_file: Path) -> list[str]:
+    """Return the notify profile names stored in config_file."""
+    saved = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    return [entry["name"] for entry in saved["notify"]]
+
+
+def test_issue_352_atomic_write_replaces_the_inode(tmp_path: Path) -> None:
+    """The normal path swaps in a new file rather than truncating the old one."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    inode = config_file.stat().st_ino
+
+    _save_arrival_profile(hass)
+
+    assert config_file.stat().st_ino != inode
+    assert _saved_profile_names(config_file) == ["arrival"]
+
+
+def test_issue_352_unmatched_owner_writes_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the temp file cannot take the original owner, keep the original file."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    inode = config_file.stat().st_ino
+    monkeypatch.setattr(settings_module, "_match_owner", lambda temp_path, current: False)
+
+    _save_arrival_profile(hass)
+
+    assert config_file.stat().st_ino == inode
+    assert _saved_profile_names(config_file) == ["arrival"]
+    assert _config_dir_files(paths["config_dir"]) == ["configuration.yaml"]
+
+
+def test_issue_352_match_owner_reports_chown_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different owner that chown cannot set is reported, not ignored."""
+    temp_file = tmp_path / "temp"
+    temp_file.write_text("x", encoding="utf-8")
+    own = temp_file.stat()
+
+    def refuse_chown(path, uid, gid):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(settings_module.os, "chown", refuse_chown)
+
+    assert settings_module._match_owner(str(temp_file), own) is True
+    other = SimpleNamespace(st_uid=own.st_uid + 1, st_gid=own.st_gid)
+    assert settings_module._match_owner(str(temp_file), other) is False
+
+
+def test_issue_352_temp_file_failure_writes_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writable file in a directory that refuses temp files is still saved."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    inode = config_file.stat().st_ino
+
+    def denied_mkstemp(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(settings_module.tempfile, "mkstemp", denied_mkstemp)
+
+    _save_arrival_profile(hass)
+
+    assert config_file.stat().st_ino == inode
+    assert _saved_profile_names(config_file) == ["arrival"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_issue_352_writable_file_in_read_only_directory(tmp_path: Path) -> None:
+    """A bind-mounted writable file in a read-only directory keeps working."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_dir = paths["config_dir"]
+    config_file = config_dir.joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    config_dir.chmod(0o555)
+    try:
+        _save_arrival_profile(hass)
+    finally:
+        config_dir.chmod(0o755)
+    assert _saved_profile_names(config_file) == ["arrival"]
+
+
+def test_issue_352_new_configuration_yaml_respects_umask(tmp_path: Path) -> None:
+    """A newly created configuration.yaml gets the umask-derived mode."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    previous = os.umask(0o027)
+    try:
+        _save_arrival_profile(hass)
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o640
+    assert _saved_profile_names(config_file) == ["arrival"]
+
+
+def test_issue_352_acl_file_writes_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file with a POSIX ACL is rewritten in place so the ACL survives."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    inode = config_file.stat().st_ino
+    monkeypatch.setattr(settings_module, "_has_posix_acl", lambda path: True)
+
+    _save_arrival_profile(hass)
+
+    assert config_file.stat().st_ino == inode
+    assert _saved_profile_names(config_file) == ["arrival"]
+
+
+def test_issue_352_has_posix_acl_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ACL detection reads the access ACL xattr and tolerates unsupported systems."""
+    monkeypatch.setattr(
+        settings_module.os,
+        "listxattr",
+        lambda path: ["user.note", "system.posix_acl_access"],
+        raising=False,
+    )
+    assert settings_module._has_posix_acl("/config/configuration.yaml") is True
+
+    monkeypatch.setattr(settings_module.os, "listxattr", lambda path: [], raising=False)
+    assert settings_module._has_posix_acl("/config/configuration.yaml") is False
+
+    def unsupported(path):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(settings_module.os, "listxattr", unsupported, raising=False)
+    assert settings_module._has_posix_acl("/config/configuration.yaml") is False
+
+    monkeypatch.delattr(settings_module.os, "listxattr", raising=False)
+    assert settings_module._has_posix_acl("/config/configuration.yaml") is False

@@ -1733,36 +1733,72 @@ def _write_text_in_place(path: str, content: str) -> None:
         os.fsync(target_file.fileno())
 
 
+def _has_posix_acl(path: str) -> bool:
+    """Return whether path carries a POSIX access ACL, which a rename would drop."""
+    if not hasattr(os, "listxattr"):
+        return False
+    try:
+        return "system.posix_acl_access" in os.listxattr(path)
+    except OSError:
+        return False
+
+
+def _match_owner(temp_path: str, current: os.stat_result) -> bool:
+    """Give temp_path the owner of current, returning False if that is not possible."""
+    temp = os.stat(temp_path)
+    if (temp.st_uid, temp.st_gid) == (current.st_uid, current.st_gid):
+        return True
+    try:
+        os.chown(temp_path, current.st_uid, current.st_gid)
+    except (AttributeError, OSError):
+        return False
+    return True
+
+
 def _write_text_atomically(path: str, content: str) -> None:
-    """Replace path with content so a crash never leaves it truncated."""
+    """Replace path with content so a crash never leaves it truncated.
+
+    Falls back to rewriting the file in place whenever a rename could not
+    reproduce it exactly: new files (so the umask applies), files with an
+    ACL, files whose owner cannot be matched, and directories that do not
+    allow a temp file next to the target.
+    """
     # Resolve symlinks so a linked configuration.yaml stays a link.
     target = os.path.realpath(path)
     try:
         current = os.stat(target)
     except FileNotFoundError:
-        current = None
+        _write_text_in_place(target, content)
+        return
     # Replacing via rename would bypass a read-only mode on the file itself.
-    if current is not None and (
-        not current.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
-        or not os.access(target, os.W_OK)
+    if not current.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH) or not os.access(
+        target, os.W_OK
     ):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), target)
+    if _has_posix_acl(target):
+        _write_text_in_place(target, content)
+        return
 
-    fd, temp_path = tempfile.mkstemp(
-        dir=os.path.dirname(target),
-        prefix=f".{os.path.basename(target)}.",
-        suffix=".tmp",
-    )
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            dir=os.path.dirname(target),
+            prefix=f".{os.path.basename(target)}.",
+            suffix=".tmp",
+        )
+    except OSError:
+        # e.g. a writable file bind-mounted into a read-only directory.
+        _write_text_in_place(target, content)
+        return
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
             temp_file.write(content)
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        os.chmod(temp_path, stat.S_IMODE(current.st_mode) if current else 0o644)
-        if current is not None and hasattr(os, "chown"):
-            # Keep the owner the user set. Needs root, so ignore failures.
-            with contextlib.suppress(OSError):
-                os.chown(temp_path, current.st_uid, current.st_gid)
+        os.chmod(temp_path, stat.S_IMODE(current.st_mode))
+        if not _match_owner(temp_path, current):
+            os.unlink(temp_path)
+            _write_text_in_place(target, content)
+            return
         try:
             os.replace(temp_path, target)
         except OSError as error:
