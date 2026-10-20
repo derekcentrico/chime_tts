@@ -2716,7 +2716,7 @@ def test_issue_352_acl_file_writes_in_place(
     config_file = paths["config_dir"].joinpath("configuration.yaml")
     _write_profile_config(config_file)
     inode = config_file.stat().st_ino
-    monkeypatch.setattr(settings_module, "_has_posix_acl", lambda path: True)
+    monkeypatch.setattr(settings_module, "_has_posix_acl", lambda path, name="": True)
 
     _save_arrival_profile(hass)
 
@@ -2745,3 +2745,166 @@ def test_issue_352_has_posix_acl_detection(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.delattr(settings_module.os, "listxattr", raising=False)
     assert settings_module._has_posix_acl("/config/configuration.yaml") is False
+
+
+def _is_temp_file(path: str) -> bool:
+    """Return whether path is the writer's temp file."""
+    return os.path.basename(path).startswith(".configuration.yaml.")
+
+
+def test_issue_352_temp_file_stays_private_until_owner_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The original mode is applied only after ownership is settled."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    config_file.chmod(0o664)
+    modes_at_owner_check: list[int] = []
+    real_match_owner = settings_module._match_owner
+
+    def recording_match_owner(temp_path, current):
+        modes_at_owner_check.append(stat.S_IMODE(os.stat(temp_path).st_mode))
+        return real_match_owner(temp_path, current)
+
+    monkeypatch.setattr(settings_module, "_match_owner", recording_match_owner)
+
+    _save_arrival_profile(hass)
+
+    assert modes_at_owner_check == [0o600]
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o664
+
+
+def test_issue_352_failed_owner_match_never_widens_temp_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A temp file that cannot take the owner is discarded before any chmod."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    chmod_calls: list[str] = []
+    real_chmod = os.chmod
+
+    def recording_chmod(path, mode, *args, **kwargs):
+        chmod_calls.append(str(path))
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(settings_module.os, "chmod", recording_chmod)
+    monkeypatch.setattr(settings_module, "_match_owner", lambda temp_path, current: False)
+
+    _save_arrival_profile(hass)
+
+    assert not [path for path in chmod_calls if _is_temp_file(path)]
+    assert _saved_profile_names(config_file) == ["arrival"]
+    assert _config_dir_files(paths["config_dir"]) == ["configuration.yaml"]
+
+
+@pytest.mark.parametrize("acl_on", ["temp", "directory"])
+def test_issue_352_inherited_acl_writes_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, acl_on: str
+) -> None:
+    """A default ACL on the directory, or one inherited by the temp file, keeps the file in place."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    inode = config_file.stat().st_ino
+
+    def fake_acl(path, name="system.posix_acl_access"):
+        if acl_on == "temp":
+            return _is_temp_file(path) and name == "system.posix_acl_access"
+        return name == "system.posix_acl_default"
+
+    monkeypatch.setattr(settings_module, "_has_posix_acl", fake_acl)
+
+    _save_arrival_profile(hass)
+
+    assert config_file.stat().st_ino == inode
+    assert _saved_profile_names(config_file) == ["arrival"]
+    assert _config_dir_files(paths["config_dir"]) == ["configuration.yaml"]
+
+
+@pytest.mark.parametrize(("temp_label", "replaced"), [(b"other_t", False), (b"config_t", True)])
+def test_issue_352_selinux_label_mismatch_writes_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temp_label: bytes, replaced: bool
+) -> None:
+    """A temp file with a different SELinux label is not renamed over the original."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    inode = config_file.stat().st_ino
+    monkeypatch.setattr(
+        settings_module,
+        "_selinux_label",
+        lambda path: temp_label if _is_temp_file(path) else b"config_t",
+    )
+
+    _save_arrival_profile(hass)
+
+    assert (config_file.stat().st_ino != inode) is replaced
+    assert _saved_profile_names(config_file) == ["arrival"]
+
+
+def test_issue_352_selinux_label_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing or unsupported xattrs read as no label."""
+
+    def unsupported(path, name):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(settings_module.os, "getxattr", unsupported, raising=False)
+    assert settings_module._selinux_label("/config/configuration.yaml") is None
+    monkeypatch.delattr(settings_module.os, "getxattr", raising=False)
+    assert settings_module._selinux_label("/config/configuration.yaml") is None
+
+
+@pytest.mark.parametrize("error_number", [errno.ENOSPC, errno.EDQUOT, errno.EIO])
+def test_issue_352_temp_file_error_does_not_truncate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_number: int
+) -> None:
+    """A full disk or other mkstemp failure raises without touching the file."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    original = _write_profile_config(config_file)
+
+    def failing_mkstemp(*args, **kwargs):
+        raise OSError(error_number, os.strerror(error_number))
+
+    monkeypatch.setattr(settings_module.tempfile, "mkstemp", failing_mkstemp)
+    monkeypatch.setattr(
+        settings_module,
+        "_write_text_in_place",
+        lambda path, content: pytest.fail("in-place write must not run"),
+    )
+
+    with pytest.raises(settings_module.ConfigurationYamlWriteError):
+        _save_arrival_profile(hass)
+    assert config_file.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_issue_352_failed_save_reports_profiles_now_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a failed write the panel gets what is on disk, not the pre-save list."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+
+    def partial_save(hass, profiles):
+        config_file.write_text(
+            "notify:\n  - platform: chime_tts\n    name: half_written\n"
+            "    entity_id: media_player.office\n",
+            encoding="utf-8",
+        )
+        raise settings_module.ConfigurationYamlWriteError("disk went away")
+
+    monkeypatch.setattr(settings_module, "save_notify_profiles", partial_save)
+    connection = FakeConnection()
+
+    await save_settings_handler(
+        hass, connection, _new_profile_request(dict(config_entry.options))
+    )
+
+    payload = connection.results[-1][1]
+    assert payload["message_type"] == "error"
+    assert [profile["name"] for profile in payload["notify_profiles"]] == ["half_written"]
+    assert payload["restart_required"] is True

@@ -1393,17 +1393,19 @@ async def websocket_save_settings(
                 await async_save_notify_profiles(hass, notify_validation.data)
             except ConfigurationYamlWriteError as error:
                 # The options above are already saved; only the profiles failed.
-                # Report the profiles still on disk so the panel does not show
-                # the rejected edits as saved.
+                # Report what is on disk now, which an interrupted in-place
+                # write may have changed, rather than the rejected edits.
                 LOGGER.error("Chime TTS notify profiles not saved: %s", error)
+                disk_notify_profiles, _ = await async_load_notify_profiles(hass)
                 connection.send_result(
                     msg["id"],
                     _build_save_settings_result(
                         values=dict(config_entry.options),
-                        notify_profiles=loaded_notify_profiles,
+                        notify_profiles=disk_notify_profiles,
                         message=f"Settings saved. {error}",
                         message_type="error",
-                        restart_required=validation.restart_required,
+                        restart_required=validation.restart_required
+                        or disk_notify_profiles != loaded_notify_profiles,
                     ),
                 )
                 return

@@ -1733,14 +1733,24 @@ def _write_text_in_place(path: str, content: str) -> None:
         os.fsync(target_file.fileno())
 
 
-def _has_posix_acl(path: str) -> bool:
-    """Return whether path carries a POSIX access ACL, which a rename would drop."""
+def _has_posix_acl(path: str, name: str = "system.posix_acl_access") -> bool:
+    """Return whether path carries the given ACL xattr, which a rename would drop."""
     if not hasattr(os, "listxattr"):
         return False
     try:
-        return "system.posix_acl_access" in os.listxattr(path)
+        return name in os.listxattr(path)
     except OSError:
         return False
+
+
+def _selinux_label(path: str) -> bytes | None:
+    """Return the SELinux label of path, or None if unset or unsupported."""
+    if not hasattr(os, "getxattr"):
+        return None
+    try:
+        return os.getxattr(path, "security.selinux")
+    except OSError:
+        return None
 
 
 def _match_owner(temp_path: str, current: os.stat_result) -> bool:
@@ -1755,13 +1765,27 @@ def _match_owner(temp_path: str, current: os.stat_result) -> bool:
     return True
 
 
+def _temp_matches_target(temp_path: str, target: str, current: os.stat_result) -> bool:
+    """Return whether renaming temp_path over target would keep its owner, ACL and label."""
+    if not _match_owner(temp_path, current):
+        return False
+    # mkstemp can inherit a default ACL from the directory.
+    if _has_posix_acl(temp_path):
+        return False
+    target_label = _selinux_label(target)
+    return target_label is None or target_label == _selinux_label(temp_path)
+
+
+_READ_ONLY_DIR_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
+
+
 def _write_text_atomically(path: str, content: str) -> None:
     """Replace path with content so a crash never leaves it truncated.
 
     Falls back to rewriting the file in place whenever a rename could not
-    reproduce it exactly: new files (so the umask applies), files with an
-    ACL, files whose owner cannot be matched, and directories that do not
-    allow a temp file next to the target.
+    reproduce it exactly: new files (so the umask applies), files or
+    directories with an ACL, files whose owner or SELinux label cannot be
+    matched, and directories that do not allow a temp file next to the target.
     """
     # Resolve symlinks so a linked configuration.yaml stays a link.
     target = os.path.realpath(path)
@@ -1775,18 +1799,22 @@ def _write_text_atomically(path: str, content: str) -> None:
         target, os.W_OK
     ):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), target)
-    if _has_posix_acl(target):
+    directory = os.path.dirname(target)
+    if _has_posix_acl(target) or _has_posix_acl(directory, "system.posix_acl_default"):
         _write_text_in_place(target, content)
         return
 
     try:
         fd, temp_path = tempfile.mkstemp(
-            dir=os.path.dirname(target),
+            dir=directory,
             prefix=f".{os.path.basename(target)}.",
             suffix=".tmp",
         )
-    except OSError:
-        # e.g. a writable file bind-mounted into a read-only directory.
+    except OSError as error:
+        # A writable file bind-mounted into a read-only directory. Anything
+        # else (a full disk, quota) must not reach the truncating write.
+        if error.errno not in _READ_ONLY_DIR_ERRNOS:
+            raise
         _write_text_in_place(target, content)
         return
     try:
@@ -1794,11 +1822,13 @@ def _write_text_atomically(path: str, content: str) -> None:
             temp_file.write(content)
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        os.chmod(temp_path, stat.S_IMODE(current.st_mode))
-        if not _match_owner(temp_path, current):
+        # The temp file stays 0600 until its owner is right, so it is never
+        # readable by the wrong group.
+        if not _temp_matches_target(temp_path, target, current):
             os.unlink(temp_path)
             _write_text_in_place(target, content)
             return
+        os.chmod(temp_path, stat.S_IMODE(current.st_mode))
         try:
             os.replace(temp_path, target)
         except OSError as error:
