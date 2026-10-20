@@ -1973,10 +1973,14 @@ async def async_save_data(hass: HomeAssistant):
 async def async_delete_data(hass: HomeAssistant, key):
     """Delete a key/value from integration's stored data."""
     store = storage.Store(hass, 1, DATA_STORAGE_KEY)
-    data = await store.async_load()
+    # async_load returns None until the first entry has been saved
+    data = await store.async_load() or {}
     if key in data:
         del data[key]
     await store.async_save(data)
+    # Keep the in-memory copy in step, or the next async_store_data call
+    # writes the deleted entry back
+    _data[DATA_STORAGE_KEY] = data
 
 
 async def async_get_cached_audio_data(hass: HomeAssistant, filepath_hash: str):
@@ -2014,7 +2018,7 @@ async def async_get_cached_audio_data(hass: HomeAssistant, filepath_hash: str):
                             audio_dict[AUDIO_DURATION_KEY] = float(len(audio) / 1000.0)
                         else:
                             _LOGGER.warning("Could not load audio from file: %s", audio_dict.get(key, ""))
-                            audio.dict[key] = None
+                            audio_dict[key] = None
         return audio_dict
 
     await async_remove_cached_audio_data(hass, filepath_hash, True, True)
