@@ -2507,7 +2507,7 @@ def _is_path_mutable_for_field(
     values: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether a path may be renamed or deleted from the browser."""
-    normalized_path = str(path or "").rstrip("/") or "/"
+    normalized_path = os.path.normpath(str(path or "/"))
     # Judge a symlink by where it lives, not by its target: removing it only
     # removes the link.
     located_path = os.path.join(
@@ -2548,6 +2548,8 @@ def resolve_browser_audio_file_path(
         raise ValueError("missing_path")
     if not _is_browser_audio_file_name(normalized_path):
         raise ValueError("unsupported_file_type")
+    if not _is_browser_audio_file_name(os.path.realpath(normalized_path)):
+        raise PermissionError(normalized_path)
     if not os.path.isabs(normalized_path):
         raise PermissionError(normalized_path)
     if not _is_path_within_browser_roots(
@@ -3054,7 +3056,7 @@ def delete_browser_entry(
     ):
         raise PermissionError(source_path)
     parent_path = ensure_trailing_slash(os.path.dirname(source_path) or "/")
-    if os.path.isdir(source_path):
+    if os.path.isdir(source_path) and not os.path.islink(source_path):
         shutil.rmtree(source_path)
     else:
         os.remove(source_path)
@@ -3087,6 +3089,9 @@ def save_browser_upload(
         values=values,
     )
     os.makedirs(os.path.dirname(final_path), exist_ok=True)
+    # Writing through an existing link would replace whatever it points to.
+    if os.path.islink(final_path):
+        raise PermissionError(final_path)
     with open(final_path, "wb") as upload_file:
         upload_file.write(content)
 

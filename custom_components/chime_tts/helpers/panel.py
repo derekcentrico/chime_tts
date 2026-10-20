@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ from .panel_logs import (
 )
 from ..settings import (
     CHIME_FILE_EXTENSIONS,
+    NotifyProfilesValidationResult,
     async_build_panel_payload,
     async_load_notify_profiles,
     async_save_notify_profiles,
@@ -529,7 +531,7 @@ class ChimeTTSPanelChimePreviewView(HomeAssistantView):
         if not validated_path:
             raise web.HTTPNotFound(text="The selected chime preview file could not be found.")
         # The value is free text, so without this any readable file could be served.
-        if not _is_supported_audio_upload(validated_path):
+        if not _is_supported_audio_upload(os.path.realpath(validated_path)):
             raise web.HTTPForbidden(text="Only audio files can be previewed.")
 
         content_type = mimetypes.guess_type(validated_path)[0]
@@ -574,7 +576,7 @@ class ChimeTTSPanelChimeSetOffsetPreviewView(HomeAssistantView):
             chime_path = await filesystem_helper.async_validate_path(hass, chime_path)
             if not chime_path:
                 raise FileNotFoundError(chime_value)
-            if not _is_supported_audio_upload(chime_path):
+            if not _is_supported_audio_upload(os.path.realpath(chime_path)):
                 raise ValueError("only audio files can be previewed")
             sample_path = Path(__file__).resolve().parent.parent / "panel" / "tts_audio.mp3"
             audio_bytes = await hass.async_add_executor_job(
@@ -1333,10 +1335,18 @@ async def websocket_save_settings(
         msg["values"],
         allow_invalid_paths=set(msg.get("allow_invalid_paths", [])),
     )
-    notify_validation = validate_notify_profiles(msg.get("notify_profiles"))
     restart_required = validation.restart_required
     loaded_notify_profiles, _ = await async_load_notify_profiles(hass)
-    notify_profiles_changed = notify_validation.data != loaded_notify_profiles
+    if "notify_profiles" in msg:
+        notify_validation = validate_notify_profiles(msg["notify_profiles"])
+        notify_profiles_changed = notify_validation.data != loaded_notify_profiles
+    else:
+        # An omitted key means "leave the profiles alone", not "delete them all".
+        notify_validation = NotifyProfilesValidationResult(
+            data=loaded_notify_profiles,
+            errors=[{} for _ in loaded_notify_profiles],
+        )
+        notify_profiles_changed = False
     if notify_profiles_changed:
         restart_required = True
 

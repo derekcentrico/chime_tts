@@ -2292,3 +2292,109 @@ async def test_chime_set_offset_preview_refuses_non_audio_files(tmp_path: Path, 
     with pytest.raises(panel_module.web.HTTPBadRequest):
         await panel_module.ChimeTTSPanelChimeSetOffsetPreviewView().get(request)
     assert rendered == []
+
+
+def _write_profile_config(config_file: Path) -> str:
+    """Write a configuration.yaml holding one Chime TTS notify profile."""
+    original = (
+        "# operational note\n"
+        "notify:\n"
+        "  - platform: chime_tts\n"
+        "    name: doorbell\n"
+        "    entity_id: media_player.office\n"
+    )
+    config_file.write_text(original, encoding="utf-8")
+    return original
+
+
+async def test_issue_352_save_without_notify_profiles_key_keeps_profiles(
+    tmp_path: Path,
+) -> None:
+    """A save request that omits notify_profiles must not erase existing profiles."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    original = _write_profile_config(config_file)
+    connection = FakeConnection()
+
+    await save_settings_handler(
+        hass,
+        connection,
+        {
+            "id": 7,
+            "type": "chime_tts/save_settings",
+            "values": dict(config_entry.options),
+        },
+    )
+
+    assert connection.errors == []
+    payload = connection.results[-1][1]
+    assert payload["message_type"] == "success"
+    assert payload["restart_required"] is False
+    assert [profile["name"] for profile in payload["notify_profiles"]] == ["doorbell"]
+    assert config_file.read_text(encoding="utf-8") == original
+
+
+
+async def test_chime_preview_refuses_audio_named_link_to_other_file(tmp_path: Path, monkeypatch) -> None:
+    """The audio check must look at the file a link resolves to."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    secret = paths["config_dir"] / "secrets.yaml"
+    secret.write_text("api_key: hunter2\n")
+    link = paths["custom_chimes_dir"] / "ding.mp3"
+    link.symlink_to(secret)
+
+    async def passthrough(value, *_args):
+        return value
+
+    async def fake_validate_path(_hass, path):
+        return path
+
+    monkeypatch.setattr(panel_module.filesystem_helper, "async_get_chime_path", passthrough)
+    monkeypatch.setattr(panel_module.filesystem_helper, "async_validate_path", fake_validate_path)
+
+    request = _FakeRequest(hass, {"field_key": "chime_path", "value": str(link)}, is_admin=True)
+    with pytest.raises(panel_module.web.HTTPForbidden):
+        await panel_module.ChimeTTSPanelChimePreviewView().get(request)
+    with pytest.raises(PermissionError):
+        settings_module.resolve_browser_audio_file_path(
+            hass, _config_entry, CUSTOM_CHIMES_PATH_KEY, str(link)
+        )
+
+
+def test_browser_upload_refuses_to_write_through_a_link(tmp_path: Path) -> None:
+    """Uploading over an existing link must not replace the link target."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    target = paths["config_dir"] / "secrets.yaml"
+    target.write_text("api_key: hunter2\n")
+    (paths["custom_chimes_dir"] / "ding.mp3").symlink_to(target)
+
+    with pytest.raises(PermissionError):
+        settings_module.save_browser_upload(
+            hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(paths["custom_chimes_dir"]), "ding.mp3", b"audio"
+        )
+    assert target.read_text() == "api_key: hunter2\n"
+
+
+def test_browser_root_guard_normalizes_dot_segments(tmp_path: Path) -> None:
+    """Spellings like /media/. must still count as the protected root."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    (paths["media_dir"] / "child").mkdir()
+    for spelling in (f"{paths['media_dir']}/.", f"{paths['media_dir']}/child/.."):
+        with pytest.raises(PermissionError):
+            settings_module.delete_browser_entry(hass, config_entry, TEMP_PATH_KEY, spelling)
+    assert paths["media_dir"].exists()
+
+
+def test_custom_chimes_browser_removes_directory_link(tmp_path: Path) -> None:
+    """A link to a folder is removed as a link, leaving the folder intact."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    outside = paths["config_dir"] / "keep"
+    outside.mkdir()
+    (outside / "file.txt").write_text("x")
+    link = paths["custom_chimes_dir"] / "linked"
+    link.symlink_to(outside, target_is_directory=True)
+
+    settings_module.delete_browser_entry(hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(link))
+
+    assert not link.is_symlink()
+    assert (outside / "file.txt").exists()
