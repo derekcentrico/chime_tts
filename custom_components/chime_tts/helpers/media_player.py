@@ -29,10 +29,12 @@ class ChimeTTSMediaPlayer:
         self.platform = self.get_platform()
 
         # Initialise state and values
-        self.turn_on()
-        self.initially_playing = (self.get_state() == "playing"
-                                  # Check that media_player is actually playing (HomePods can incorrectly have the state "playing" when no media is playing)
-                                  and self.get_entity().attributes.get("media_duration", -1) != 0)
+        self.initially_playing = (
+            self.get_state() == "playing" and
+            # Check that media_player is actually playing (HomePods can incorrectly have the state "playing" when no media is playing)
+            self.get_entity().attributes.get("media_duration", 0) > 0 and
+            self.get_entity().attributes.get("media_position", 0) > 0
+        )
         self.initial_volume_level: float = self.get_current_volume_level()
         self.announce_supported = self.get_supported_feature(ATTR_MEDIA_ANNOUNCE)
         self.join_supported = self.get_supported_feature(ATTR_GROUP_MEMBERS)
@@ -47,7 +49,7 @@ class ChimeTTSMediaPlayer:
                 if entity_id in volume_level_dict:
                     self.target_volume_level = float(volume_level_dict[entity_id])
         # From int or float
-        elif isinstance(target_volume_level, (int, float)):
+        elif isinstance(target_volume_level, int | float):
             self.target_volume_level = target_volume_level
         # Default
         else:
@@ -55,21 +57,21 @@ class ChimeTTSMediaPlayer:
 
     # Service Calls
 
-    def turn_on(self):
-        """Turn on the media player if it is currently off."""
+    async def async_turn_on(self) -> bool:
+        """Turn on an off media player and report whether it was requested."""
         if self.get_state() == "off":
             _LOGGER.info('Turning on "%s"...', self.entity_id)
             try:
-                self.hass.async_create_task(
-                    self.hass.services.async_call(
-                        domain="media_player",
-                        service=SERVICE_TURN_ON,
-                        service_data={CONF_ENTITY_ID: self.entity_id},
-                        blocking=True
-                    )
+                await self.hass.services.async_call(
+                    domain="media_player",
+                    service=SERVICE_TURN_ON,
+                    service_data={CONF_ENTITY_ID: self.entity_id},
+                    blocking=True,
                 )
+                return True
             except Exception as error:
                 _LOGGER.error("Error calling media_player.turn_on: %s", str(error))
+        return False
 
 
     # Getters & Setters

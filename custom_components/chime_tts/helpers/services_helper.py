@@ -1,4 +1,5 @@
 """TTS services.yaml helper functions for Chime TTS."""
+import copy
 import os
 import yaml
 import aiofiles
@@ -6,6 +7,8 @@ import aiofiles.os
 import logging
 # import voluptuous as vol
 from homeassistant.core import HomeAssistant, SupportsResponse
+from homeassistant.helpers import service as service_helper
+from homeassistant.helpers.selector import TargetSelector
 from .filesystem import FilesystemHelper
 from ..const import (
     DOMAIN,
@@ -14,8 +17,10 @@ from ..const import (
     DEFAULT_CHIME_OPTIONS,
     CUSTOM_CHIMES_PATH_KEY,
 )
+from ..chime_sets import selector_options
 filesystem_helper = FilesystemHelper()
 _LOGGER = logging.getLogger(__name__)
+_OPTIONS_MISSING = object()
 
 class ChimeTTSServicesHelper:
     """Helper services YAML file functions for Chime TTS."""
@@ -25,10 +30,13 @@ class ChimeTTSServicesHelper:
     async def async_update_services_yaml(self,
                                          hass,
                                          say_service_func,
-                                         say_url_service_func):
+                                         say_url_service_func) -> bool:
         """Update the list of chimes for the say and say-url services."""
         custom_chimes_options = await filesystem_helper.async_get_chime_options_from_path(self._data[CUSTOM_CHIMES_PATH_KEY])
-        await self._async_update_chime_lists(hass=hass, custom_chime_options=custom_chimes_options)
+        services_yaml = await self._async_update_chime_lists(
+            hass=hass,
+            custom_chime_options=custom_chimes_options,
+        )
         hass.services.async_remove(DOMAIN, SERVICE_SAY)
         hass.services.async_register(DOMAIN, SERVICE_SAY, say_service_func)
         hass.services.async_remove(DOMAIN, SERVICE_SAY_URL)
@@ -36,6 +44,10 @@ class ChimeTTSServicesHelper:
                                     SERVICE_SAY_URL,
                                     say_url_service_func,
                                     supports_response=SupportsResponse.ONLY)
+        if isinstance(services_yaml, dict):
+            self._refresh_service_descriptions(hass, services_yaml)
+            return True
+        return False
 
     # Service fields whose chime dropdown options are kept in sync.
     _CHIME_OPTION_FIELDS = (
@@ -44,19 +56,18 @@ class ChimeTTSServicesHelper:
         (SERVICE_SAY_URL, "chime_path"),
         (SERVICE_SAY_URL, "end_chime_path"),
     )
-
     async def _async_update_chime_lists(self, hass: HomeAssistant, custom_chime_options: list | None):
-        """Modify the chime path drop down options."""
+        """Modify the chime path dropdown options."""
 
         services_yaml = await self._async_parse_services_yaml()
         if not services_yaml:
-            return
+            return None
 
         try:
-            final_options = self._build_chime_options(custom_chime_options)
+            final_options = self._build_chime_options(custom_chime_options, self._data)
         except Exception as e:
             _LOGGER.error("Unexpected error building chime options: %s", str(e))
-            return
+            return None
 
         # Only write when an option list actually changes, and never after an
         # error. A previous version saved unconditionally, which re-persisted a
@@ -64,20 +75,23 @@ class ChimeTTSServicesHelper:
         changed = False
         for service_name, field in self._CHIME_OPTION_FIELDS:
             options = self._get_field_options(services_yaml, service_name, field)
-            if options is None:
+            if options is _OPTIONS_MISSING:
                 # Unexpected structure, e.g. a stale file from an older version.
                 # Skip rather than overwrite with a half-built document.
                 _LOGGER.debug("No options list for %s.%s; skipping", service_name, field)
                 continue
-            if options != final_options:
+            if not isinstance(options, list) or options != final_options:
                 self._set_field_options(services_yaml, service_name, field, list(final_options))
                 changed = True
 
         if changed:
             await self._async_save_services_yaml(services_yaml)
+        return services_yaml
 
     @staticmethod
-    def _build_chime_options(custom_chime_options: list | None) -> list:
+    def _build_chime_options(
+        custom_chime_options: list | None, data: dict | None = None
+    ) -> list:
         """Return the sorted chime options with every label and value as a str.
 
         HA's select selector requires string label/value pairs. Custom chime
@@ -86,34 +100,48 @@ class ChimeTTSServicesHelper:
         (issue #294). Entries missing a label or value are dropped rather than
         coerced to the string "None".
         """
-        merged = list(DEFAULT_CHIME_OPTIONS) + list(custom_chime_options or [])
+        merged = (
+            list(DEFAULT_CHIME_OPTIONS)
+            + list(custom_chime_options or [])
+            + selector_options(data or {})
+        )
         options = [
             {"label": str(o["label"]), "value": str(o["value"])}
             for o in merged
             if isinstance(o, dict) and o.get("label") is not None and o.get("value") is not None
         ]
         options.sort(key=lambda x: x["label"].lower())
-        if not custom_chime_options:
-            options.append(
-                {
-                    "label": "*** Add a local folder path in the configuration for your own custom chimes ***",
-                    "value": "",
-                }
-            )
         return options
 
     @staticmethod
     def _get_field_options(services_yaml: dict, service_name: str, field: str):
-        """Return the existing options list for a service field, or None if absent."""
+        """Return the existing options list, or a sentinel if its path is absent."""
         try:
             return services_yaml[service_name]["fields"][field]["selector"]["select"]["options"]
         except (KeyError, TypeError):
-            return None
+            return _OPTIONS_MISSING
 
     @staticmethod
     def _set_field_options(services_yaml: dict, service_name: str, field: str, options: list) -> None:
         """Write the options list for a service field."""
-        services_yaml[service_name]["fields"][field]["selector"]["select"]["options"] = options
+        services_yaml[service_name]["fields"][field]["selector"]["select"]["options"] = copy.deepcopy(options)
+
+    @staticmethod
+    def _refresh_service_descriptions(hass: HomeAssistant, services_yaml: dict) -> None:
+        """Refresh Home Assistant's cached service descriptions for say actions."""
+        for service_name in (SERVICE_SAY, SERVICE_SAY_URL):
+            schema = services_yaml.get(service_name)
+            if isinstance(schema, dict):
+                # The normal services.yaml loader turns shorthand target filters
+                # into lists. This runtime refresh bypasses that loader.
+                if "target" in schema:
+                    schema["target"] = TargetSelector.CONFIG_SCHEMA(schema["target"])
+                service_helper.async_set_service_schema(
+                    hass,
+                    DOMAIN,
+                    service_name,
+                    copy.deepcopy(schema),
+                )
 
     async def _async_parse_services_yaml(self):
         """Load the services.yaml file into a dictionary."""
@@ -140,7 +168,16 @@ class ChimeTTSServicesHelper:
 
         try:
             async with aiofiles.open(services_file_path, mode='w') as file:
-                await file.write(yaml.safe_dump(services_yaml, default_flow_style=False, sort_keys=False))
+                dumper = yaml.SafeDumper
+                dumper.ignore_aliases = lambda self, data: True
+                await file.write(
+                    yaml.dump(
+                        services_yaml,
+                        Dumper=dumper,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
+                )
 
             _LOGGER.info("Updated services.yaml chime options.")
         except Exception as e:
