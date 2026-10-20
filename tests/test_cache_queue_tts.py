@@ -194,6 +194,34 @@ async def test_async_delete_data_is_not_restored_by_next_store(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_async_delete_data_keeps_entries_stored_during_its_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An entry stored while the delete is awaiting its save must survive in memory and on disk."""
+    hass = FakeHass()
+    concurrent_store: list = []
+
+    class RacingStore(_MemoryStore):
+        """Run a concurrent async_store_data while the first save is in flight."""
+
+        async def async_save(self, data):
+            if concurrent_store:
+                await concurrent_store.pop()
+            _MemoryStore.contents = dict(data)
+
+    entries = {"stale": {LOCAL_PATH_KEY: "/media/temp/stale.mp3"}}
+    monkeypatch.setattr(integration_module.storage, "Store", RacingStore)
+    monkeypatch.setattr(_MemoryStore, "contents", dict(entries))
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, dict(entries))
+    concurrent_store.append(
+        integration_module.async_store_data(hass, "new", {LOCAL_PATH_KEY: "/media/temp/new.mp3"})
+    )
+
+    await integration_module.async_delete_data(hass, "stale")
+
+    assert set(integration_module._data[DATA_STORAGE_KEY]) == {"new"}
+    assert set(_MemoryStore.contents) == {"new"}
+
+
+@pytest.mark.asyncio
 async def test_async_remove_cached_audio_data_deletes_storage_when_paths_removed(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cache metadata should be deleted once all referenced files are removed."""
     hass = FakeHass()
