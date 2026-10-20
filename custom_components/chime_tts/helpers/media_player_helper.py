@@ -20,6 +20,7 @@ from ..const import (
     CAST_PLATFORM,
     SONOS_PLATFORM,
     SPOTIFY_PLATFORM,
+    SQUEEZEBOX_PLATFORM,
     TRANSITION_STEP_MS,
 )
 from ..config import (
@@ -125,6 +126,7 @@ class MediaPlayerHelper:
                 and media_player.target_volume_level
                 not in [-1, media_player.initial_volume_level]
                 and media_player.platform not in (SPOTIFY_PLATFORM, SONOS_PLATFORM)
+                and not self.get_uses_announce_volume(media_player)
             ):
                 set_volume_media_players.append(media_player)
         return set_volume_media_players
@@ -183,6 +185,19 @@ class MediaPlayerHelper:
             ALEXA_MEDIA_PLAYER_PLATFORM,
             SONOS_PLATFORM,
             SPOTIFY_PLATFORM,
+            SQUEEZEBOX_PLATFORM,
+        )
+
+    def get_uses_announce_volume(self, media_player: ChimeTTSMediaPlayer) -> bool:
+        """Whether the player takes its target volume from the announcement itself.
+
+        Squeezebox applies `extra.announce_volume` for the announcement only and
+        restores the previous level afterwards, so no volume_set is needed.
+        """
+        return bool(
+            self.announce
+            and media_player.announce_supported
+            and media_player.platform == SQUEEZEBOX_PLATFORM
         )
 
     def get_platform_from_entity_id(self, entity_id):
