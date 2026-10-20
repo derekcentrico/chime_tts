@@ -18,6 +18,7 @@ from pydub import AudioSegment
 
 from custom_components.chime_tts.const import (
     AUDIO_CACHED_KEY,
+    AUDIO_PATH_KEY,
     AUDIO_DURATION_KEY,
     CROSSFADE_KEY,
     LOCAL_PATH_KEY,
@@ -506,3 +507,33 @@ async def test_uncached_audio_files_are_removed_after_playback(
 
     assert local.exists() is cached
     assert www_copy.exists() is cached
+
+
+@pytest.mark.asyncio
+async def test_legacy_entry_keeps_its_sonos_copy_for_cleanup(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy-format entry whose audio is gone still removes its Sonos copy."""
+    _real_delete(monkeypatch)
+    www_copy = config_root / "www" / "chime_tts" / "cached.mp3"
+    www_copy.parent.mkdir(parents=True)
+    www_copy.write_bytes(b"audio")
+    monkeypatch.setattr(
+        integration_module,
+        "async_retrieve_data",
+        AsyncMock(
+            return_value={
+                AUDIO_PATH_KEY: str(config_root / "temp" / "gone.mp3"),
+                AUDIO_DURATION_KEY: 1.0,
+                SONOS_WWW_PATH_KEY: str(www_copy),
+            }
+        ),
+    )
+    monkeypatch.setattr(integration_module, "async_delete_data", AsyncMock())
+
+    result = await integration_module.async_verify_cached_audio(
+        Hass(config_root), "cache-key", {}, {}, True, False, ""
+    )
+
+    assert result is None
+    assert not www_copy.exists()

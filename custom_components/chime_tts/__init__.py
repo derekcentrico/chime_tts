@@ -2186,11 +2186,15 @@ async def async_get_cached_audio_data(hass: HomeAssistant, filepath_hash: str):
             duration = audio_dict.get(AUDIO_DURATION_KEY, duration)
         if path is not None:
             is_public = await filesystem_helper.async_file_exists_in_directory(path, '/www')
+            # Keep a Sonos copy recorded on a legacy entry so cleanup can find it.
+            sonos_www_path = audio_dict.get(SONOS_WWW_PATH_KEY) if isinstance(audio_dict, dict) else None
             audio_dict = {
                 LOCAL_PATH_KEY: None if is_public else path,
                 PUBLIC_PATH_KEY: path if is_public else None,
                 AUDIO_DURATION_KEY: duration
             }
+            if sonos_www_path:
+                audio_dict[SONOS_WWW_PATH_KEY] = sonos_www_path
 
         # Validate paths and add duration if missing
         for key in [LOCAL_PATH_KEY, PUBLIC_PATH_KEY]:
