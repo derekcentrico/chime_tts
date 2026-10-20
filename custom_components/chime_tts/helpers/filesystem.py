@@ -2,6 +2,8 @@
 
 import logging
 import secrets
+import inspect
+from typing import Any
 import os
 import hashlib
 import shutil
@@ -12,8 +14,9 @@ from asyncio import create_subprocess_exec
 from asyncio.subprocess import PIPE
 from concurrent.futures import ThreadPoolExecutor
 from pydub import AudioSegment
-import requests
+import aiohttp
 
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.network import get_url
 from homeassistant.core import HomeAssistant
 from ..const import (
@@ -27,6 +30,10 @@ from ..const import (
     TEMP_CHIMES_PATH_KEY,
     LOCAL_PATH_KEY,
     AUDIO_DURATION_KEY,
+    CHIME_DOWNLOAD_TIMEOUT,
+    CHIME_DOWNLOAD_MAX_BYTES,
+    CHIME_DOWNLOAD_MAX_REDIRECTS,
+    CHIME_DOWNLOAD_CHUNK_SIZE,
 )
 from ..chime_sets import get_set_by_reference, choose_member, member_offset
 from .media_player_helper import MediaPlayerHelper
@@ -47,6 +54,12 @@ _AUDIO_EXTENSIONS = [
     ".ape",
     ".oga",
 ]
+
+
+# Per-request auto_decompress is missing from older aiohttp releases.
+_REQUEST_SUPPORTS_AUTO_DECOMPRESS = "auto_decompress" in inspect.signature(
+    aiohttp.ClientSession._request
+).parameters
 
 
 class FilesystemHelper:
@@ -316,61 +329,119 @@ class FilesystemHelper:
 
     async def async_download_file(self, hass: HomeAssistant, url, folder):
         """Download a file and save locally."""
+        _LOGGER.debug("Downloading chime at URL: %s", url)
         try:
-            _LOGGER.debug("Downloading chime at URL: %s", url)
-            response = await hass.async_add_executor_job(requests.get, url)
-            response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx status codes)
-        except requests.exceptions.HTTPError as errh:
+            content = await self._async_fetch_chime(hass, url)
+        except TimeoutError:
+            # Checked first: aiohttp's ServerTimeoutError is also a connection error
+            _LOGGER.warning(
+                "Timeout Error: chime download exceeded %s seconds",
+                CHIME_DOWNLOAD_TIMEOUT,
+            )
+            return None
+        except aiohttp.ClientResponseError as errh:
             _LOGGER.warning("HTTP Error: %s", str(errh))
             return None
-        except requests.exceptions.ConnectionError as errc:
+        except aiohttp.ClientConnectionError as errc:
             _LOGGER.warning("Error Connecting: %s", str(errc))
             return None
-        except requests.exceptions.Timeout as errt:
-            _LOGGER.warning("Timeout Error: %s", str(errt))
-            return None
-        except requests.exceptions.RequestException as err:
+        except aiohttp.ClientError as err:
             _LOGGER.warning("Request Exception: %s", str(err))
             return None
         except Exception as error:
             _LOGGER.warning("An unexpected error occurred: %s", str(error))
             return None
 
-        if response is None:
-            _LOGGER.warning("Received an invalid response")
+        if content is None:
             return None
 
-        content_type = response.headers.get("Content-Type", "")
-        if "audio" in content_type or "octet-stream" in content_type:
-            _LOGGER.debug("Audio downloaded successfully")
-            _, file_extension = os.path.splitext(url)
-            try:
-                audio_content = await self.async_load_audio(
-                    BytesIO(response.content)
-                )  # ,
-            # format=file_extension.replace(".", ""))
-            except Exception as error:
+        _LOGGER.debug("Audio downloaded successfully")
+        try:
+            audio_content = await self.async_load_audio(BytesIO(content))
+        except Exception as error:
+            _LOGGER.warning(
+                "Error when loading audio from downloaded file: %s", str(error)
+            )
+            return None
+        if audio_content is not None:
+            audio_file_path = await self.async_save_audio_to_folder(
+                hass=hass, audio=audio_content, folder=folder, file_name=url
+            )
+            if not audio_file_path:
+                _LOGGER.warning("Unable to save downloaded chime from %s", url)
+                return None
+            audio_duration = float(len(audio_content) / 1000)
+            return {
+                LOCAL_PATH_KEY: audio_file_path,
+                AUDIO_DURATION_KEY: audio_duration,
+            }
+        _LOGGER.warning("Downloaded file did not contain audio: %s", url)
+        return None
+
+    async def _async_fetch_chime(self, hass: HomeAssistant, url: str) -> bytes | None:
+        """Fetch a chime URL with time, redirect, and size limits.
+
+        Returns None when the response is not audio or exceeds the size cap.
+        Network, HTTP status, and timeout errors are raised to the caller.
+        """
+        session = async_get_clientsession(hass)
+        timeout = aiohttp.ClientTimeout(total=CHIME_DOWNLOAD_TIMEOUT)
+        # Never let aiohttp inflate the body: it would do so on the event loop
+        # before the size cap below sees the bytes. Compressed bodies are
+        # refused instead.
+        request_kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "max_redirects": CHIME_DOWNLOAD_MAX_REDIRECTS,
+            "headers": {"Accept-Encoding": "identity"},
+        }
+        if _REQUEST_SUPPORTS_AUTO_DECOMPRESS:
+            request_kwargs["auto_decompress"] = False
+        async with session.get(url, **request_kwargs) as response:
+            response.raise_for_status()
+
+            content_encoding = response.headers.get("Content-Encoding", "").strip().lower()
+            if content_encoding not in ("", "identity"):
                 _LOGGER.warning(
-                    "Error when loading audio from downloaded file: %s", str(error)
+                    "Chime at %s was sent with Content-Encoding '%s', which is not accepted",
+                    url,
+                    content_encoding,
                 )
                 return None
-            if audio_content is not None:
-                audio_file_path = await self.async_save_audio_to_folder(
-                    hass=hass, audio=audio_content, folder=folder, file_name=url
+
+            content_type = response.headers.get("Content-Type", "")
+            media_type = content_type.split(";", 1)[0].strip().lower()
+            # Same rule as before, case-insensitive. octet-stream covers servers
+            # that do not label audio (e.g. .oga).
+            if "audio" not in media_type and "octet-stream" not in media_type:
+                _LOGGER.warning(
+                    "Unable to extract audio from URL with content-type '%s'",
+                    str(content_type),
                 )
-                audio_duration = float(len(audio_content) / 1000)
-                return {
-                    LOCAL_PATH_KEY: audio_file_path,
-                    AUDIO_DURATION_KEY: audio_duration,
-                }
-            else:
-                _LOGGER.warning("Downloaded file did not contain audio: %s", url)
-        else:
-            _LOGGER.warning(
-                "Unable to extract audio from URL with content-type '%s'",
-                str(content_type),
-            )
-        return None
+                return None
+
+            if (
+                response.content_length is not None
+                and response.content_length > CHIME_DOWNLOAD_MAX_BYTES
+            ):
+                _LOGGER.warning(
+                    "Chime at %s is %s bytes, over the %s byte limit",
+                    url,
+                    response.content_length,
+                    CHIME_DOWNLOAD_MAX_BYTES,
+                )
+                return None
+
+            content = bytearray()
+            async for chunk in response.content.iter_chunked(CHIME_DOWNLOAD_CHUNK_SIZE):
+                content.extend(chunk)
+                if len(content) > CHIME_DOWNLOAD_MAX_BYTES:
+                    _LOGGER.warning(
+                        "Chime at %s exceeded the %s byte limit",
+                        url,
+                        CHIME_DOWNLOAD_MAX_BYTES,
+                    )
+                    return None
+            return bytes(content)
 
     async def async_get_chime_path_with_offset(
         self, chime_path: str, cache, data: dict, hass: HomeAssistant
