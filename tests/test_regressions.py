@@ -1213,15 +1213,14 @@ def test_issue_275_runner_does_not_sleep_without_tag(monkeypatch):
     assert events == []
 
 
-def test_issue_275_runner_forwards_blocking_flag(monkeypatch):
-    """volume_set completes before the settle delay starts; untagged calls stay non-blocking."""
+def test_issue_275_runner_blocks_only_settle_calls(monkeypatch):
+    """volume_set completes before the settle delay; every other call stays non-blocking."""
     from custom_components.chime_tts import _sonos_volume_set_call
 
-    volume_call = _sonos_volume_set_call("media_player.kitchen", 40)
-    assert volume_call["blocking"] is True
-
     calls = [
-        volume_call,
+        _sonos_volume_set_call("media_player.kitchen", 40),
+        # Squeezebox play_media blocks until the announcement ends, so a
+        # blocking call here would serialise playback across targets.
         {"domain": "media_player", "service": "play_media", "service_data": {}, "blocking": True},
         {"domain": "notify", "service": "alexa_media", "service_data": {}},
     ]
@@ -1232,10 +1231,41 @@ def test_issue_275_runner_forwards_blocking_flag(monkeypatch):
     assert result is True
     assert blocking_flags == [
         ("volume_set", True),
-        ("play_media", True),
+        ("play_media", False),
         ("alexa_media", False),
     ]
     assert events[:2] == [("call", "volume_set"), ("sleep", 0.2)]
+
+
+def test_issue_275_runner_settles_all_sonos_volumes_once(monkeypatch):
+    """Per-speaker volume_sets fire together with one wait, so rooms start in step."""
+    from custom_components.chime_tts import _sonos_volume_set_call
+
+    def _play(entity_id):
+        return {
+            "domain": "media_player",
+            "service": "play_media",
+            "service_data": {"entity_id": entity_id},
+        }
+
+    calls = [
+        _sonos_volume_set_call("media_player.kitchen", 25),
+        _play("media_player.kitchen"),
+        {**_sonos_volume_set_call("media_player.office", 40), "delay_after": 300},
+        _play("media_player.office"),
+        {"domain": "notify", "service": "alexa_media", "service_data": {}},
+    ]
+    result, events = _fire_calls_with_fake_sleep(monkeypatch, calls)
+
+    assert result is True
+    assert events == [
+        ("call", "volume_set"),
+        ("call", "volume_set"),
+        ("sleep", 0.3),
+        ("call", "play_media"),
+        ("call", "play_media"),
+        ("call", "alexa_media"),
+    ]
 
 
 def test_media_content_id_missing_path_returns_none():
