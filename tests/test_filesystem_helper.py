@@ -469,7 +469,7 @@ async def test_download_chime_returns_none_when_save_fails(
 async def test_download_chime_does_not_inflate_on_the_loop(
     chime_server: TestServer, download_helper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """aiohttp must not decompress the body, even when the server ignores Accept-Encoding."""
+    """The body is never inflated, even when the server ignores Accept-Encoding."""
     import zlib
 
     helper, hass, _loaded = download_helper
