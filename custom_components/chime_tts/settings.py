@@ -1833,7 +1833,8 @@ def _fsync_directory(directory: str) -> None:
 
 def _fsync_file(path: str) -> None:
     """Flush a file's data and metadata to disk."""
-    fd = os.open(path, os.O_RDONLY)
+    # Write-only, since the target's mode may not allow reading.
+    fd = os.open(path, os.O_WRONLY)
     try:
         os.fsync(fd)
     finally:
