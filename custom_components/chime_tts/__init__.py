@@ -1853,7 +1853,9 @@ async def async_fire_media_service_calls(hass: HomeAssistant, media_service_call
             await hass.services.async_call(
                 domain=service_call["domain"],
                 service=service_call["service"],
-                service_data=service_call["service_data"]
+                service_data=service_call["service_data"],
+                # A settle delay only means something once the call has completed
+                blocking=service_call.get("blocking", False),
             )
             # Optional settle delay before the next call (Sonos volume_set ahead of play_media)
             delay_after = service_call.get("delay_after", 0)

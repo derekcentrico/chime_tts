@@ -1148,15 +1148,17 @@ def test_issue_275_sonos_volume_set_carries_settle_delay():
     assert SONOS_VOLUME_SETTLE_MS > 0
 
 
-def _fire_calls_with_fake_sleep(monkeypatch, calls, fail_service=None):
+def _fire_calls_with_fake_sleep(monkeypatch, calls, fail_service=None, return_blocking=False):
     integration = importlib.import_module("custom_components.chime_tts")
     events = []
+    blocking_flags = []
 
     class _Services:
-        async def async_call(self, domain, service, service_data=None):
+        async def async_call(self, domain, service, service_data=None, blocking=False):
             if service == fail_service:
                 raise RuntimeError("boom")
             events.append(("call", service))
+            blocking_flags.append((service, blocking))
 
     class _Hass:
         services = _Services()
@@ -1166,6 +1168,8 @@ def _fire_calls_with_fake_sleep(monkeypatch, calls, fail_service=None):
 
     monkeypatch.setattr(integration.asyncio, "sleep", _fake_sleep)
     result = asyncio.run(integration.async_fire_media_service_calls(_Hass(), calls))
+    if return_blocking:
+        return result, events, blocking_flags
     return result, events
 
 
@@ -1207,6 +1211,31 @@ def test_issue_275_runner_does_not_sleep_without_tag(monkeypatch):
 
     assert result is False
     assert events == []
+
+
+def test_issue_275_runner_forwards_blocking_flag(monkeypatch):
+    """volume_set completes before the settle delay starts; untagged calls stay non-blocking."""
+    from custom_components.chime_tts import _sonos_volume_set_call
+
+    volume_call = _sonos_volume_set_call("media_player.kitchen", 40)
+    assert volume_call["blocking"] is True
+
+    calls = [
+        volume_call,
+        {"domain": "media_player", "service": "play_media", "service_data": {}, "blocking": True},
+        {"domain": "notify", "service": "alexa_media", "service_data": {}},
+    ]
+    result, events, blocking_flags = _fire_calls_with_fake_sleep(
+        monkeypatch, calls, return_blocking=True
+    )
+
+    assert result is True
+    assert blocking_flags == [
+        ("volume_set", True),
+        ("play_media", True),
+        ("alexa_media", False),
+    ]
+    assert events[:2] == [("call", "volume_set"), ("sleep", 0.2)]
 
 
 def test_media_content_id_missing_path_returns_none():
