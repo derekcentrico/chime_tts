@@ -2280,7 +2280,7 @@ def get_filename_hash_from_service_data(params: dict, options: dict):
     except (TypeError, ValueError):
         has_additional_repeats = False
     if has_additional_repeats:
-        unique_string += "-repeat-semantics-additional-plays-v1"
+        unique_string += "-repeat-semantics-additional-plays-v2"
 
     # Labelled so it never collides with an equal initial_delay, which is
     # repeated per play rather than added once.
