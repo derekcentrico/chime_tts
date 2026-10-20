@@ -69,3 +69,21 @@ def test_falls_back_to_registries_when_target_helper_lacks_target_selection():
     })
 
     assert resolver.resolve_media_player_entity_ids(hass, {"device_id": "device_1"}) == ["media_player.kitchen"]
+
+
+def test_issue_362_fallback_expands_group_members():
+    """The registry fallback must expand group entities, including nested groups."""
+    resolver = _resolver_module()
+    resolver.target_helper = None
+    group_states = {
+        "group.downstairs": SimpleNamespace(attributes={"entity_id": ["media_player.kitchen", "group.den"]}),
+        "group.den": SimpleNamespace(attributes={"entity_id": ["media_player.den", "group.downstairs"]}),
+    }
+    hass = SimpleNamespace(
+        data={"entity_registry": SimpleNamespace(entities={})},
+        states=SimpleNamespace(get=group_states.get),
+    )
+
+    assert resolver.resolve_media_player_entity_ids(hass, {"entity_id": "group.downstairs"}) == [
+        "media_player.den", "media_player.kitchen",
+    ]

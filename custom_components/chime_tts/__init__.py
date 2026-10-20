@@ -2016,12 +2016,20 @@ async def async_fire_media_service_calls(hass: HomeAssistant, media_service_call
     # wait once, so rooms with different volumes do not start staggered.
     settle_calls = [call for call in media_service_calls if _settle_delay_ms(call) > 0]
     other_calls = [call for call in media_service_calls if _settle_delay_ms(call) == 0]
+    settled_delays = []
     for service_call in settle_calls:
-        # Block so the delay starts once the volume change has been applied
-        if not await _async_fire_media_service_call(hass, service_call, blocking=True):
-            return False
-    if settle_calls:
-        await asyncio.sleep(max(_settle_delay_ms(call) for call in settle_calls) / 1000)
+        # Block so the delay starts once the volume change has been applied.
+        # A failure here only skips the volume change; aborting would leave
+        # players paused or joined because post-playback restore never runs.
+        if await _async_fire_media_service_call(hass, service_call, blocking=True):
+            settled_delays.append(_settle_delay_ms(service_call))
+        else:
+            _LOGGER.warning(
+                "Unable to set the announcement volume for %s, playing at its current volume",
+                service_call["service_data"].get(CONF_ENTITY_ID),
+            )
+    if settled_delays:
+        await asyncio.sleep(max(settled_delays) / 1000)
 
     for service_call in other_calls:
         if not await _async_fire_media_service_call(hass, service_call):

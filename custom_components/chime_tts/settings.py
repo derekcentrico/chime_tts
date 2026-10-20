@@ -1761,6 +1761,9 @@ def _has_posix_acl(path: str, name: str = "system.posix_acl_access") -> bool:
         return False
 
 
+_UNSUPPORTED_ERRNOS = {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL}
+
+
 def _has_extra_xattrs(path: str) -> bool:
     """Return whether path has extended attributes a rename would not carry over.
 
@@ -1770,8 +1773,10 @@ def _has_extra_xattrs(path: str) -> bool:
         return False
     try:
         names = os.listxattr(path)
-    except OSError:
-        return False
+    except OSError as error:
+        # Only a filesystem without xattrs is known to have none. Any other
+        # failure picks the in-place write, which cannot drop them.
+        return error.errno not in _UNSUPPORTED_ERRNOS
     return any(name != "security.selinux" for name in names)
 
 
@@ -1816,11 +1821,23 @@ def _fsync_directory(directory: str) -> None:
     except OSError:
         return
     try:
-        # Some filesystems refuse fsync on a directory; the rename still happened.
-        with contextlib.suppress(OSError):
-            os.fsync(dir_fd)
+        os.fsync(dir_fd)
+    except OSError as error:
+        # Some filesystems refuse fsync on a directory; the rename still
+        # happened. A real I/O error is reported.
+        if error.errno not in _UNSUPPORTED_ERRNOS:
+            raise
     finally:
         os.close(dir_fd)
+
+
+def _fsync_file(path: str) -> None:
+    """Flush a file's data and metadata to disk."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 _READ_ONLY_DIR_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
@@ -1879,6 +1896,8 @@ def _write_text_atomically(path: str, content: str) -> None:
             _write_text_in_place(target, content)
             return
         os.chmod(temp_path, stat.S_IMODE(current.st_mode))
+        # Persist the owner and mode change before the rename makes it visible.
+        _fsync_file(temp_path)
         try:
             os.replace(temp_path, target)
         except OSError as error:

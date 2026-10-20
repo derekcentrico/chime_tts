@@ -3038,3 +3038,59 @@ def test_issue_352_extra_xattr_detection_ignores_selinux(monkeypatch: pytest.Mon
     assert settings_module._has_extra_xattrs("/config/configuration.yaml") is False
     monkeypatch.setattr(settings_module.os, "listxattr", lambda path: ["security.selinux", "user.note"])
     assert settings_module._has_extra_xattrs("/config/configuration.yaml") is True
+
+
+def test_issue_352_xattr_listing_failure_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only an unsupported filesystem counts as having no xattrs."""
+
+    def fail(code: int):
+        def listxattr(path: str) -> list[str]:
+            raise OSError(code, os.strerror(code))
+
+        return listxattr
+
+    monkeypatch.setattr(settings_module.os, "listxattr", fail(errno.ENOTSUP), raising=False)
+    assert settings_module._has_extra_xattrs("/config/configuration.yaml") is False
+    monkeypatch.setattr(settings_module.os, "listxattr", fail(errno.EIO), raising=False)
+    assert settings_module._has_extra_xattrs("/config/configuration.yaml") is True
+
+
+def test_issue_352_directory_fsync_reports_io_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unsupported directory fsync is ignored; an I/O error is raised."""
+
+    def fsync_with(code: int):
+        def fsync(fd: int) -> None:
+            raise OSError(code, os.strerror(code))
+
+        return fsync
+
+    monkeypatch.setattr(settings_module.os, "fsync", fsync_with(errno.EINVAL))
+    settings_module._fsync_directory(str(tmp_path))
+    monkeypatch.setattr(settings_module.os, "fsync", fsync_with(errno.EIO))
+    with pytest.raises(OSError):
+        settings_module._fsync_directory(str(tmp_path))
+
+
+def test_issue_352_temp_file_is_synced_after_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mode change is flushed before the temp file is renamed into place."""
+    config_file = tmp_path / "configuration.yaml"
+    config_file.write_text("old: 1\n", encoding="utf-8")
+    config_file.chmod(0o640)
+    events: list[str] = []
+    real_chmod, real_replace = os.chmod, os.replace
+    monkeypatch.setattr(
+        settings_module.os, "chmod", lambda *a, **k: (events.append("chmod"), real_chmod(*a, **k))[1]
+    )
+    monkeypatch.setattr(settings_module, "_fsync_file", lambda path: events.append("fsync"))
+    monkeypatch.setattr(
+        settings_module.os, "replace", lambda *a, **k: (events.append("replace"), real_replace(*a, **k))[1]
+    )
+
+    settings_module._write_text_atomically(str(config_file), "new: 2\n")
+
+    assert events == ["chmod", "fsync", "replace"]
+    assert config_file.read_text(encoding="utf-8") == "new: 2\n"
