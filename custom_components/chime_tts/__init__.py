@@ -377,14 +377,16 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
             # Files from uncached calls (say_url defaults to cache: false) are
             # never recorded in storage, so sweep the www folder as well (#342)
             www_path = _data.get(WWW_PATH_KEY)
-            if clear_www_tts_cache and await hass.async_add_executor_job(is_integration_www_folder, www_path):
-                # Sweep the folder the guard resolved, not a re-resolution of
-                # the raw path, so "link/../chime_tts" can't land elsewhere.
+            sweep_folder = (
+                await hass.async_add_executor_job(resolve_integration_www_folder, www_path)
+                if clear_www_tts_cache
+                else None
+            )
+            if sweep_folder:
                 removed = await hass.async_add_executor_job(
-                    filesystem_helper.delete_generated_audio_files,
-                    await hass.async_add_executor_job(os.path.realpath, www_path),
+                    filesystem_helper.delete_generated_audio_files, sweep_folder
                 )
-                _LOGGER.debug("Removed %s uncached audio file(s) from %s", removed, www_path)
+                _LOGGER.debug("Removed %s uncached audio file(s) from %s", removed, sweep_folder)
             elif clear_www_tts_cache:
                 _LOGGER.debug("Skipping uncached audio sweep: %s is not a dedicated chime_tts folder", www_path)
 
@@ -425,25 +427,32 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
 
     return True
 
-def is_integration_www_folder(path: str | None) -> bool:
-    """Return True when path is a folder named like the default www folder.
+def resolve_integration_www_folder(path: str | None) -> str | None:
+    """Return the real folder to sweep when path is the integration's own www folder.
 
     The sweep matches files by name only, so it is limited to a folder this
-    integration owns rather than a shared one such as the www root. A symlink
-    could point anywhere, so it never counts. Touches the filesystem; run it
-    in the executor.
+    integration owns rather than a shared one such as the www root. The folder
+    is resolved once, the way the OS resolves it, and the sweep uses that
+    result, so the check and the deletion can't land in different places. A
+    symlinked folder could point anywhere, so it never counts. Touches the
+    filesystem; run it in the executor.
     """
     if not path:
-        return False
-    folder = os.path.normpath(path)
-    if os.path.islink(folder) or os.path.islink(path.rstrip("/")):
-        return False
+        return None
+    raw_path = path.rstrip("/") or "/"
+    # lstat resolves every component but the last as the OS would.
+    if os.path.islink(raw_path):
+        return None
     default_name = os.path.basename(os.path.normpath(WWW_PATH_DEFAULT))
-    return (
-        os.path.basename(folder) == default_name
-        and os.path.basename(os.path.realpath(folder)) == default_name
-    )
+    real_folder = os.path.realpath(raw_path)
+    if os.path.basename(real_folder) != default_name or os.path.basename(raw_path) != default_name:
+        return None
+    return real_folder
 
+
+def is_integration_www_folder(path: str | None) -> bool:
+    """Return True when path is the integration's own www folder."""
+    return resolve_integration_www_folder(path) is not None
 
 async def async_run_script(hass: HomeAssistant, script):
     """Run a configured script entity, optionally with YAML-provided variables."""
@@ -2203,7 +2212,8 @@ async def async_get_cached_audio_data(hass: HomeAssistant, filepath_hash: str):
         if audio_dict.get(LOCAL_PATH_KEY) or audio_dict.get(PUBLIC_PATH_KEY):
             return audio_dict
 
-    await async_remove_cached_audio_data(hass, filepath_hash, True, True)
+    # The entry is unusable, so its www copies (including a Sonos copy) go too.
+    await async_remove_cached_audio_data(hass, filepath_hash, True, True, True)
     return None
 
 

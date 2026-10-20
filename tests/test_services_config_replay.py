@@ -1014,3 +1014,16 @@ async def test_issue_342_sweep_is_not_redirected_by_parent_segments(
     await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
 
     assert other_file.exists()
+
+
+def test_resolve_integration_www_folder_matches_the_os_resolution(tmp_path) -> None:
+    """The folder that passes the check is the one the OS resolves, and the one swept."""
+    (tmp_path / "chime_tts").mkdir()
+    (tmp_path / "b" / "sub").mkdir(parents=True)
+    (tmp_path / "b" / "chime_tts").mkdir()
+    (tmp_path / "jump").symlink_to(tmp_path / "b" / "sub", target_is_directory=True)
+    configured = f"{tmp_path}/jump/../chime_tts/"
+
+    assert integration_module.resolve_integration_www_folder(configured) == str(tmp_path / "b" / "chime_tts")
+    assert integration_module.resolve_integration_www_folder(f"{tmp_path}/chime_tts") == str(tmp_path / "chime_tts")
+    assert integration_module.resolve_integration_www_folder(None) is None

@@ -132,7 +132,7 @@ async def test_async_get_cached_audio_data_removes_missing_entry(monkeypatch: py
     result = await integration_module.async_get_cached_audio_data(hass, "missing")
 
     assert result is None
-    remove_cached.assert_awaited_once_with(hass, "missing", True, True)
+    remove_cached.assert_awaited_once_with(hass, "missing", True, True, True)
 
 
 @pytest.mark.asyncio
