@@ -742,7 +742,7 @@ class MediaPlayerHelper:
         Cast has no announce mode, so raising the volume first makes the current
         media blast at announcement volume until play_media replaces it.
         """
-        if media_player.platform != CAST_PLATFORM or media_player.get_state() != "playing":
+        if media_player.platform != CAST_PLATFORM or media_player.get_state() not in ("playing", "buffering"):
             return
         # Players on the fade/pause path are resumed afterwards. A pause that has
         # not reported yet must not turn into a stop that loses the session.

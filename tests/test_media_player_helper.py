@@ -426,3 +426,21 @@ async def test_issue_315_cast_guard_keeps_paused_session_for_resume(
     )
 
     assert "media_stop" not in _services_called(hass)
+
+
+@pytest.mark.asyncio
+async def test_issue_315_buffering_cast_is_stopped_before_volume_rises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Cast player still buffering its stream counts as active (#315)."""
+    helper = MediaPlayerHelper()
+    hass = Hass()
+    monkeypatch.setattr(helper, "async_wait_until_target_volume_reached", AsyncMock())
+    cast = Player("media_player.cast", platform="cast", initial=0.2, target=0.8)
+    cast.state = "buffering"
+
+    await helper.async_set_volume_for_media_players(
+        hass, [cast], "target_volume_level", 0
+    )
+
+    assert _services_called(hass) == ["media_stop", "volume_set"]

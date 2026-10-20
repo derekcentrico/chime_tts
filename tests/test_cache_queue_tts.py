@@ -156,6 +156,21 @@ async def test_async_get_cached_audio_data_drops_unloadable_path(monkeypatch: py
     remove.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_issue_367_unloadable_public_only_entry_is_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An undecodable public-only entry is removed for good, not reloaded intact."""
+    entry = {LOCAL_PATH_KEY: None, PUBLIC_PATH_KEY: "/config/www/chime_tts/corrupt.mp3"}
+    monkeypatch.setattr(integration_module, "async_retrieve_data", AsyncMock(side_effect=lambda *_: dict(entry)))
+    monkeypatch.setattr(integration_module.filesystem_helper, "path_exists", lambda path: True)
+    monkeypatch.setattr(integration_module.filesystem_helper, "delete_file", lambda hass, path: None)
+    monkeypatch.setattr(integration_module, "async_get_audio_from_path", AsyncMock(return_value=None))
+    delete_data = AsyncMock()
+    monkeypatch.setattr(integration_module, "async_delete_data", delete_data)
+
+    assert await integration_module.async_get_cached_audio_data(FakeHass(), "corrupt") is None
+    delete_data.assert_awaited_once_with(ANY, "corrupt")
+
+
 class _MemoryStore:
     """Storage stub backed by a shared dict, returning None when empty like HA's Store."""
 

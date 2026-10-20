@@ -83,8 +83,6 @@ from .const import (
     FFMPEG_ARGS_ALEXA,
     SONOS_PLATFORM,
     SONOS_VOLUME_SETTLE_MS,
-    SQUEEZEBOX_PLATFORM,
-    SQUEEZEBOX_ATTR_ANNOUNCE_VOLUME,
     MP3_PRESET_CUSTOM_PREFIX,
     MP3_PRESET_CUSTOM_KEY,
     QUEUE_TIMEOUT_KEY,
@@ -92,6 +90,8 @@ from .const import (
     TTS_TIMEOUT_KEY,
     TTS_TIMEOUT_DEFAULT,
     SPOTIFY_PLATFORM,
+    SQUEEZEBOX_PLATFORM,
+    SQUEEZEBOX_ATTR_ANNOUNCE_VOLUME,
     TTS_PLATFORM_KEY,
     DEFAULT_LANGUAGE_KEY,
     DEFAULT_VOICE_KEY,
@@ -560,13 +560,13 @@ async def async_prepare_media(hass: HomeAssistant, params, options, media_player
                 params["announce"],
                 params.get("extra"),
             )
-            if play_result is True:
-                await async_post_playback_actions(
-                    hass,
-                    audio_duration,
-                    params["final_delay"],
-                    media_players_array,
-                )
+            await async_post_playback_actions(
+                hass,
+                audio_duration,
+                params["final_delay"],
+                media_players_array,
+                wait_for_playback=play_result is not False,
+            )
 
             # Optional script to run after playback (#310)
             await async_run_script(hass, params.get("post_script"))
@@ -1773,7 +1773,7 @@ async def async_play_media(
         hass, entity_ids, service_data, audio_dict, extra
     )
     play_result = await async_fire_media_service_calls(hass, media_service_calls)
-    if play_result is False:
+    if play_result is not True:
         _LOGGER.error("Playback failed")
 
     return play_result
@@ -2002,12 +2002,12 @@ async def async_prepare_media_service_calls(
 def _settle_delay_ms(service_call: dict) -> float:
     """Settle delay requested by a service call, or 0 when none is set."""
     delay_after = service_call.get("delay_after", 0)
-    if isinstance(delay_after, (int, float)) and delay_after > 0:
+    if isinstance(delay_after, int | float) and delay_after > 0:
         return delay_after
     return 0
 
-async def async_fire_media_service_calls(hass: HomeAssistant, media_service_calls):
-    """Fire the array of media service_calls."""
+async def async_fire_media_service_calls(hass: HomeAssistant, media_service_calls) -> bool | None:
+    """Fire media service calls, returning None after a partial dispatch failure."""
     if media_service_calls is None:
         _LOGGER.error("No service calls to fire")
         return False
@@ -2023,9 +2023,11 @@ async def async_fire_media_service_calls(hass: HomeAssistant, media_service_call
     if settle_calls:
         await asyncio.sleep(max(_settle_delay_ms(call) for call in settle_calls) / 1000)
 
+    dispatched_playback = False
     for service_call in other_calls:
         if not await _async_fire_media_service_call(hass, service_call):
-            return False
+            return None if dispatched_playback else False
+        dispatched_playback = True
 
     return True
 
@@ -2075,20 +2077,22 @@ async def _async_fire_media_service_call(hass: HomeAssistant, service_call: dict
 async def async_post_playback_actions(hass: HomeAssistant,
                                       audio_duration: float,
                                       final_delay: float,
-                                      media_players_array: list[ChimeTTSMediaPlayer]):
+                                      media_players_array: list[ChimeTTSMediaPlayer],
+                                      wait_for_playback: bool = True):
     """Run post playback actions."""
-    # Wait the audio playback duration
-    total_delay_s = round(audio_duration + ((final_delay/1000) if final_delay > 0 else 0),3)
-    _LOGGER.debug(" - Waiting %ss for audio playback to complete...", str(total_delay_s))
-    await hass.async_add_executor_job(time.sleep, total_delay_s)
+    if wait_for_playback:
+        # Wait the audio playback duration
+        total_delay_s = round(audio_duration + ((final_delay/1000) if final_delay > 0 else 0),3)
+        _LOGGER.debug(" - Waiting %ss for audio playback to complete...", str(total_delay_s))
+        await hass.async_add_executor_job(time.sleep, total_delay_s)
 
-    # Wait for playback to end on all media_players
-    playing_media_players: list[ChimeTTSMediaPlayer] = []
-    for media_player in media_players_array:
-        if not(media_player_helper.announce and (media_player.platform == SPOTIFY_PLATFORM or media_player.platform == SONOS_PLATFORM)):
-            playing_media_players.append(media_player)
-    if not await media_player_helper.async_wait_until_media_players_state_not(hass, playing_media_players, "playing"):
-        _LOGGER.debug(" - Timed out waiting for playback to complete")
+        # Wait for playback to end on all media_players
+        playing_media_players: list[ChimeTTSMediaPlayer] = []
+        for media_player in media_players_array:
+            if not(media_player_helper.announce and (media_player.platform == SPOTIFY_PLATFORM or media_player.platform == SONOS_PLATFORM)):
+                playing_media_players.append(media_player)
+        if not await media_player_helper.async_wait_until_media_players_state_not(hass, playing_media_players, "playing"):
+            _LOGGER.debug(" - Timed out waiting for playback to complete")
 
     fade_in_media_players: list[ChimeTTSMediaPlayer] = media_player_helper.get_fade_in_out_media_players()
     set_volume_media_players: list[ChimeTTSMediaPlayer] = media_player_helper.get_set_volume_media_players()

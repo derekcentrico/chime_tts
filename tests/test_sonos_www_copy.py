@@ -495,6 +495,7 @@ async def test_uncached_audio_files_are_removed_after_playback(
     )
     monkeypatch.setattr(integration_module, "async_play_media", AsyncMock(return_value=False))
     monkeypatch.setattr(integration_module, "async_run_script", AsyncMock())
+    monkeypatch.setattr(integration_module, "async_post_playback_actions", AsyncMock())
 
     await integration_module.async_prepare_media(
         Hass(config_root),

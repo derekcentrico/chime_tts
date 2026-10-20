@@ -1214,6 +1214,20 @@ def test_issue_275_runner_does_not_sleep_without_tag(monkeypatch):
     assert events == []
 
 
+def test_issue_275_runner_reports_partial_dispatch_failure(monkeypatch):
+    """A later failure must not skip playback cleanup for earlier dispatches."""
+    calls = [
+        {"domain": "media_player", "service": "play_media", "service_data": {}},
+        {"domain": "notify", "service": "alexa_media", "service_data": {}},
+    ]
+    result, events = _fire_calls_with_fake_sleep(
+        monkeypatch, calls, fail_service="alexa_media"
+    )
+
+    assert result is None
+    assert events == [("call", "play_media")]
+
+
 def test_issue_275_runner_blocks_only_settle_calls(monkeypatch):
     """volume_set completes before the settle delay; every other call stays non-blocking."""
     from custom_components.chime_tts import _sonos_volume_set_call
@@ -2408,6 +2422,47 @@ async def test_issue_309_squeezebox_waits_for_announcement_to_finish(monkeypatch
         await integration.async_post_playback_actions(_Hass(), 0, 0, helper.media_players)
 
     assert [p.entity_id for p in waited] == ["media_player.kitchen"]
+
+
+async def test_issue_275_failed_settle_still_restores_players(monkeypatch):
+    """A failed playback skips the playback wait but still restores the players."""
+    import custom_components.chime_tts as integration
+
+    helper = integration.media_player_helper
+    monkeypatch.setitem(integration._data, integration.FADE_TRANSITION_KEY, 0)
+    steps = []
+
+    async def _record(name):
+        async def _step(*args, **kwargs):
+            steps.append(name)
+            return True
+
+        return _step
+
+    async def _no_wait(*args, **kwargs):
+        raise AssertionError("must not wait for playback that never started")
+
+    monkeypatch.setattr(helper, "async_wait_until_media_players_state_not", _no_wait)
+    for name in (
+        "async_resume_playback",
+        "async_set_volume_for_media_players",
+        "async_unjoin_media_players",
+        "async_sonos_restore",
+    ):
+        monkeypatch.setattr(helper, name, await _record(name))
+
+    class _Hass:
+        async def async_add_executor_job(self, func, *args):
+            raise AssertionError("must not sleep for playback that never started")
+
+    await integration.async_post_playback_actions(_Hass(), 5, 0, [], wait_for_playback=False)
+
+    assert steps == [
+        "async_resume_playback",
+        "async_set_volume_for_media_players",
+        "async_unjoin_media_players",
+        "async_sonos_restore",
+    ]
 
 
 async def test_issue_309_squeezebox_unset_target_not_batched_with_explicit(monkeypatch):
