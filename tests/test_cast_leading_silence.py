@@ -11,11 +11,13 @@ import pytest
 from pydub import AudioSegment
 
 from custom_components.chime_tts.const import (
+    ADD_COVER_ART_KEY,
     AUDIO_DURATION_KEY,
     CAST_LEADING_SILENCE_KEY,
     CROSSFADE_KEY,
     DEFAULT_CAST_LEADING_SILENCE_MS,
     INITIAL_DELAY_KEY,
+    LOCAL_PATH_KEY,
     OFFSET_KEY,
     TEMP_PATH_KEY,
     WWW_PATH_KEY,
@@ -140,9 +142,43 @@ def test_cast_leading_silence_is_part_of_cache_key() -> None:
     assert key({**base, CAST_LEADING_SILENCE_KEY: 0}, {}) == key(base, {})
 
 
+
+
+class Generation:
+    """Stubbed audio pipeline that records every file it writes."""
+
+    def __init__(self, temp: Path) -> None:
+        """Track saved, converted and loaded files in memory."""
+        self.temp = temp
+        self.files: dict[str, AudioSegment] = {}
+        self.saved: list[tuple[str, AudioSegment]] = []
+        self.converted: list[tuple[str, str]] = []
+        self.export = AsyncMock()
+
+    async def save(self, hass, audio: AudioSegment, folder: str) -> str:
+        """Record the audio written to a folder."""
+        del hass
+        path = f"{folder}/{len(self.saved)}.mp3"
+        self.files[path] = audio
+        self.saved.append((folder, audio))
+        return path
+
+    async def load(self, path: str) -> AudioSegment:
+        """Decode a previously written file."""
+        return self.files[path]
+
+    async def convert(self, hass, path: str, ffmpeg_args: str) -> str:
+        """Pretend FFmpeg rewrote the file with new properties."""
+        del hass
+        new_path = f"{path}.converted.mp3"
+        self.files[new_path] = self.files[path]
+        self.converted.append((path, ffmpeg_args))
+        return new_path
+
+
 @pytest.fixture
-def generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
-    """Stub audio generation around a 100 ms segment and capture exports."""
+def generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generation:
+    """Stub audio generation around a 100 ms segment."""
     temp = tmp_path / "temp"
     temp.mkdir()
     monkeypatch.setattr(
@@ -155,17 +191,23 @@ def generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
             WWW_PATH_KEY: str(tmp_path / "www"),
         },
     )
+    stub = Generation(temp)
     segment = AudioSegment.silent(duration=100)
     fs = integration_module.filesystem_helper
     monkeypatch.setattr(
         fs, "async_get_chime_path_with_offset", AsyncMock(return_value=(None, None))
     )
+    monkeypatch.setattr(fs, "async_save_audio_to_folder", stub.save)
+    monkeypatch.setattr(fs, "async_load_audio", stub.load)
+    monkeypatch.setattr(fs, "async_export_audio", stub.export)
     monkeypatch.setattr(
-        fs, "async_save_audio_to_folder", AsyncMock(return_value=str(temp / "a.mp3"))
+        fs, "async_get_external_url", AsyncMock(side_effect=lambda hass, path: path)
     )
-    monkeypatch.setattr(fs, "async_load_audio", AsyncMock(return_value=segment))
-    export = AsyncMock()
-    monkeypatch.setattr(fs, "async_export_audio", export)
+    monkeypatch.setattr(fs, "path_to_parent_folder", lambda folder: "/config")
+    monkeypatch.setattr(fs, "path_exists", lambda path: True)
+    monkeypatch.setattr(
+        integration_module.helpers, "async_ffmpeg_convert_from_file", stub.convert
+    )
     helper = integration_module.media_player_helper
     monkeypatch.setattr(helper, "get_alexa_media_players_count", lambda: 0)
     monkeypatch.setattr(helper, "get_media_content_id", lambda *args, **kwargs: "id")
@@ -182,7 +224,7 @@ def generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         integration_module, "validate_audio_dict", lambda *args, **kwargs: True
     )
     monkeypatch.setattr(integration_module.tts_audio_helper, "_data", {})
-    return export
+    return stub
 
 
 def _playback_params(tmp_path: Path, **extra: object) -> dict:
@@ -199,30 +241,98 @@ def _playback_params(tmp_path: Path, **extra: object) -> dict:
 
 @pytest.mark.asyncio
 async def test_cast_leading_silence_is_added_once_after_repeat(
-    tmp_path: Path, generation: AsyncMock
+    tmp_path: Path, generation: Generation
 ) -> None:
     """The pad precedes the first play only and counts toward playback time."""
     audio_dict = await integration_module.async_get_playback_audio_path(
-        _playback_params(
-            tmp_path, repeat=2, **{CAST_LEADING_SILENCE_KEY: 2000}
-        ),
+        _playback_params(tmp_path, repeat=2, **{CAST_LEADING_SILENCE_KEY: 2000}),
         {},
     )
 
-    # 2000 ms pad + three 100 ms plays in the final written file.
-    exported: AudioSegment = generation.await_args.args[0]
-    assert len(exported) == 2300
+    # 2000 ms pad + three 100 ms plays, written once and never re-exported.
+    assert [len(audio) for _, audio in generation.saved] == [2300]
+    generation.export.assert_not_awaited()
     assert audio_dict[AUDIO_DURATION_KEY] == pytest.approx(2.3)
 
 
 @pytest.mark.asyncio
 async def test_non_cast_playback_audio_is_unchanged(
-    tmp_path: Path, generation: AsyncMock
+    tmp_path: Path, generation: Generation
 ) -> None:
-    """Without a Cast pad the audio is not re-exported or lengthened."""
+    """Without a Cast pad the audio is not lengthened."""
     audio_dict = await integration_module.async_get_playback_audio_path(
         _playback_params(tmp_path, **{CAST_LEADING_SILENCE_KEY: 0}), {}
     )
 
-    generation.assert_not_awaited()
+    assert [len(audio) for _, audio in generation.saved] == [100]
+    generation.export.assert_not_awaited()
     assert audio_dict[AUDIO_DURATION_KEY] == pytest.approx(0.1)
+
+
+@pytest.mark.asyncio
+async def test_public_copy_for_alexa_carries_the_cast_pad(
+    tmp_path: Path, generation: Generation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mixed Cast and Alexa targets share one padded timeline."""
+    monkeypatch.setattr(
+        integration_module.media_player_helper, "get_alexa_media_players_count", lambda: 1
+    )
+    audio_dict = await integration_module.async_get_playback_audio_path(
+        _playback_params(
+            tmp_path,
+            entity_ids=["media_player.kitchen", "media_player.echo"],
+            repeat=1,
+            **{CAST_LEADING_SILENCE_KEY: 2000},
+        ),
+        {},
+    )
+
+    folders = [folder for folder, _ in generation.saved]
+    assert folders == [str(generation.temp), str(tmp_path / "www")]
+    assert [len(audio) for _, audio in generation.saved] == [2200, 2200]
+    assert audio_dict[AUDIO_DURATION_KEY] == pytest.approx(2.2)
+
+
+@pytest.mark.asyncio
+async def test_cast_pad_goes_through_cover_art_and_ffmpeg_conversion(
+    tmp_path: Path, generation: Generation
+) -> None:
+    """Cover art and the configured codec apply to the padded file and stay in it."""
+    integration_module._data[ADD_COVER_ART_KEY] = True
+    audio_dict = await integration_module.async_get_playback_audio_path(
+        _playback_params(
+            tmp_path, ffmpeg_args="-b:a 48k", **{CAST_LEADING_SILENCE_KEY: 2000}
+        ),
+        {},
+    )
+
+    assert [len(audio) for _, audio in generation.saved] == [2100]
+    assert len(generation.converted) == 2
+    assert "cover_art.jpg" in generation.converted[0][1]
+    assert generation.converted[1][1] == "-b:a 48k"
+    # The converted file is what plays; nothing overwrites it afterwards.
+    generation.export.assert_not_awaited()
+    assert audio_dict[LOCAL_PATH_KEY].endswith(".converted.mp3.converted.mp3")
+    assert audio_dict[AUDIO_DURATION_KEY] == pytest.approx(2.1)
+
+
+@pytest.mark.parametrize(
+    ("frame_rate", "channels", "sample_width"),
+    [(48000, 2, 4), (8000, 1, 2)],
+)
+def test_leading_silence_keeps_the_audio_format(
+    frame_rate: int, channels: int, sample_width: int
+) -> None:
+    """The pad matches the audio, so it is never resampled or remixed."""
+    audio = (
+        AudioSegment.silent(duration=100, frame_rate=frame_rate)
+        .set_channels(channels)
+        .set_sample_width(sample_width)
+    )
+
+    padded = integration_module._prepend_silence(audio, 2000)
+
+    assert padded.frame_rate == frame_rate
+    assert padded.channels == channels
+    assert padded.sample_width == sample_width
+    assert len(padded) == 2100
