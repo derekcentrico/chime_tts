@@ -1186,13 +1186,11 @@ async def async_get_playback_audio_path(params: dict, options: dict):
                 cover_art_filepath = f"{filesystem_helper.path_to_parent_folder('custom_components')}/chime_tts/cover_art.jpg"
                 if await hass.async_add_executor_job(filesystem_helper.path_exists, cover_art_filepath):
                     _LOGGER.debug("Adding cover art to %s", new_audio_file)
-                    with_cover_art = await helpers.async_ffmpeg_convert_from_file(
+                    # A failed conversion returns False; keep playing the original.
+                    new_audio_file = await helpers.async_ffmpeg_convert_from_file(
                         hass,
                         new_audio_file,
-                        f"-i {cover_art_filepath} -c copy -map 0 -map 1")
-                    # A failed conversion returns False; keep playing the original.
-                    if with_cover_art:
-                        new_audio_file = with_cover_art
+                        f"-i {cover_art_filepath} -c copy -map 0 -map 1") or new_audio_file
 
         # Perform FFmpeg conversion
         if ffmpeg_args:
@@ -1848,6 +1846,17 @@ def _squeezebox_service_calls(entity_ids: list[str], service_data: dict, extra: 
             })
     return service_calls
 
+
+async def _async_alexa_compatible_file(hass: HomeAssistant, public_file: str) -> str:
+    """Convert public_file for Alexa Media Player, keeping the original if that fails."""
+    if await filesystem_helper.async_is_audio_alexa_compatible(hass=hass, file_path=public_file):
+        return public_file
+    converted = await helpers.async_ffmpeg_convert_from_file(hass, public_file, FFMPEG_ARGS_ALEXA)
+    if not converted:
+        _LOGGER.warning("Alexa conversion failed; sending the unconverted file: %s", public_file)
+        return public_file
+    return converted
+
 async def async_prepare_media_service_calls(
     hass: HomeAssistant, entity_ids, service_data, audio_dict, extra: dict | None = None
 ):
@@ -1972,13 +1981,7 @@ async def async_prepare_media_service_calls(
         for entity_id in alexa_media_player_entity_ids:
             _LOGGER.debug("     - %s", entity_id)
 
-        # Ensure audio file is Alexa Media Player compatible
-        if not await filesystem_helper.async_is_audio_alexa_compatible(hass=hass, file_path=public_file):
-            converted_public_file = await helpers.async_ffmpeg_convert_from_file(hass, public_file, FFMPEG_ARGS_ALEXA)
-            if converted_public_file:
-                public_file = converted_public_file
-            else:
-                _LOGGER.warning("Alexa conversion failed; sending the unconverted file: %s", public_file)
+        public_file = await _async_alexa_compatible_file(hass, public_file)
 
         # Add service call
         if len(public_file) > 0:
