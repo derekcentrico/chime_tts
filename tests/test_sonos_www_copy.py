@@ -325,13 +325,62 @@ def _real_delete(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_clearing_the_local_cache_also_removes_the_sonos_copy(
+async def test_temp_only_clear_keeps_the_sonos_copy_for_a_later_www_clear(
     config_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Dropping a cache entry must not leave its Sonos www copy behind."""
+    """Clearing only the temp cache keeps the Sonos copy and its entry; a www clear then removes both."""
     _real_delete(monkeypatch)
     local = config_root / "temp" / "cached.mp3"
     local.write_bytes(b"audio")
+    www_copy = config_root / "www" / "chime_tts" / "cached.mp3"
+    www_copy.parent.mkdir(parents=True)
+    www_copy.write_bytes(b"audio")
+    stored = {
+        "cache-key": {
+            LOCAL_PATH_KEY: str(local),
+            PUBLIC_PATH_KEY: None,
+            AUDIO_DURATION_KEY: 1.0,
+            SONOS_WWW_PATH_KEY: str(www_copy),
+        }
+    }
+
+    async def retrieve(hass, key):
+        return dict(stored[key]) if key in stored else None
+
+    async def store(hass, key, value):
+        stored[key] = dict(value)
+
+    async def delete(hass, key):
+        stored.pop(key, None)
+
+    monkeypatch.setattr(integration_module, "async_retrieve_data", retrieve)
+    monkeypatch.setattr(integration_module, "async_store_data", store)
+    monkeypatch.setattr(integration_module, "async_delete_data", delete)
+    hass = Hass(config_root)
+
+    await integration_module.async_remove_cached_audio_data(
+        hass, "cache-key", clear_temp_tts_cache=True
+    )
+
+    assert not local.exists()
+    assert www_copy.exists()
+    assert stored["cache-key"][LOCAL_PATH_KEY] is None
+    assert stored["cache-key"][SONOS_WWW_PATH_KEY] == str(www_copy)
+
+    await integration_module.async_remove_cached_audio_data(
+        hass, "cache-key", clear_www_tts_cache=True
+    )
+
+    assert not www_copy.exists()
+    assert stored == {}
+
+
+@pytest.mark.asyncio
+async def test_lookup_of_a_sonos_only_entry_cleans_it_up(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kept entry with only a Sonos path is treated as a cache miss without crashing."""
+    _real_delete(monkeypatch)
     www_copy = config_root / "www" / "chime_tts" / "cached.mp3"
     www_copy.parent.mkdir(parents=True)
     www_copy.write_bytes(b"audio")
@@ -340,8 +389,9 @@ async def test_clearing_the_local_cache_also_removes_the_sonos_copy(
         "async_retrieve_data",
         AsyncMock(
             return_value={
-                LOCAL_PATH_KEY: str(local),
+                LOCAL_PATH_KEY: None,
                 PUBLIC_PATH_KEY: None,
+                AUDIO_DURATION_KEY: 1.0,
                 SONOS_WWW_PATH_KEY: str(www_copy),
             }
         ),
@@ -349,13 +399,13 @@ async def test_clearing_the_local_cache_also_removes_the_sonos_copy(
     delete_data = AsyncMock()
     monkeypatch.setattr(integration_module, "async_delete_data", delete_data)
 
-    await integration_module.async_remove_cached_audio_data(
-        Hass(config_root), "cache-key", clear_temp_tts_cache=True
+    result = await integration_module.async_verify_cached_audio(
+        Hass(config_root), "cache-key", {}, {}, True, False, ""
     )
 
-    assert not local.exists()
+    assert result is None
     assert not www_copy.exists()
-    delete_data.assert_awaited_once_with(ANY, "cache-key")
+    delete_data.assert_awaited_once()
 
 
 @pytest.mark.asyncio

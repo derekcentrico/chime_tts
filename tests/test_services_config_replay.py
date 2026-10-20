@@ -862,6 +862,46 @@ def test_is_integration_www_folder(path: str | None, expected: bool) -> None:
 
 
 @pytest.mark.asyncio
+async def test_issue_342_sweep_skips_a_symlinked_www_folder(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A www/chime_tts symlink to a shared folder is not swept."""
+    hass = FakeHass()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    other_file = shared / "0123456789abcdef0123456789abcdef.mp3"
+    other_file.write_bytes(b"audio")
+    www = tmp_path / "www" / "chime_tts"
+    www.parent.mkdir()
+    www.symlink_to(shared, target_is_directory=True)
+    monkeypatch.setitem(integration_module._data, DATA_STORAGE_KEY, None)
+    monkeypatch.setitem(integration_module._data, WWW_PATH_KEY, f"{www}/")
+
+    await integration_module.async_setup(hass, SimpleNamespace())
+    clear_cache_handler = hass.services.registered[(DOMAIN, SERVICE_CLEAR_CACHE)][0]
+    await clear_cache_handler(SimpleNamespace(data={"clear_www_tts_cache": True}))
+
+    assert other_file.exists()
+
+
+def test_is_integration_www_folder_resolves_symlinks(tmp_path) -> None:
+    """Symlinked folders, or folders resolving to another name, do not count."""
+    real = tmp_path / "www" / "chime_tts"
+    real.mkdir(parents=True)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    link = tmp_path / "other" / "chime_tts"
+    link.parent.mkdir()
+    link.symlink_to(shared, target_is_directory=True)
+    parent_link = tmp_path / "linked_parent"
+    parent_link.symlink_to(tmp_path / "www", target_is_directory=True)
+
+    assert integration_module.is_integration_www_folder(f"{real}/") is True
+    assert integration_module.is_integration_www_folder(f"{link}/") is False
+    assert integration_module.is_integration_www_folder(f"{parent_link}/chime_tts/") is True
+
+
+@pytest.mark.asyncio
 async def test_replay_raises_before_first_say(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replay should fail until a prior `say` request has been stored."""
     hass = FakeHass()

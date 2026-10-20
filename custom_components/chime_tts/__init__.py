@@ -377,7 +377,7 @@ async def async_setup(hass: HomeAssistant, _config_entry: ConfigEntry) -> bool: 
             # Files from uncached calls (say_url defaults to cache: false) are
             # never recorded in storage, so sweep the www folder as well (#342)
             www_path = _data.get(WWW_PATH_KEY)
-            if clear_www_tts_cache and is_integration_www_folder(www_path):
+            if clear_www_tts_cache and await hass.async_add_executor_job(is_integration_www_folder, www_path):
                 removed = await hass.async_add_executor_job(
                     filesystem_helper.delete_generated_audio_files,
                     www_path,
@@ -427,12 +427,20 @@ def is_integration_www_folder(path: str | None) -> bool:
     """Return True when path is a folder named like the default www folder.
 
     The sweep matches files by name only, so it is limited to a folder this
-    integration owns rather than a shared one such as the www root.
+    integration owns rather than a shared one such as the www root. A symlink
+    could point anywhere, so it never counts. Touches the filesystem; run it
+    in the executor.
     """
     if not path:
         return False
+    folder = os.path.normpath(path)
+    if os.path.islink(folder):
+        return False
     default_name = os.path.basename(os.path.normpath(WWW_PATH_DEFAULT))
-    return os.path.basename(os.path.normpath(path)) == default_name
+    return (
+        os.path.basename(folder) == default_name
+        and os.path.basename(os.path.realpath(folder)) == default_name
+    )
 
 
 async def async_run_script(hass: HomeAssistant, script):
@@ -2228,15 +2236,17 @@ async def async_remove_cached_audio_data(hass: HomeAssistant,
             await filesystem_helper.async_delete_file(hass, value)
             audio_dict[SONOS_WWW_PATH_KEY] = None
 
-    # Remove key/value from integration storage if no paths remain. The Sonos
-    # copy is made from the local file and is useless without the entry, so
-    # drop it too rather than leave it orphaned in www.
+    # Remove key/value from integration storage if no paths remain. A Sonos
+    # copy outlives its local file when only the temp cache is cleared, so keep
+    # the entry with just that path for a later www clear to remove.
     if (
         audio_dict.get(LOCAL_PATH_KEY, None) is None
         and audio_dict.get(PUBLIC_PATH_KEY, None) is None
     ):
-        await async_delete_sonos_www_copy(hass, audio_dict)
-        await async_delete_data(hass, filepath_hash)
+        if audio_dict.get(SONOS_WWW_PATH_KEY):
+            await async_store_data(hass, filepath_hash, audio_dict)
+        else:
+            await async_delete_data(hass, filepath_hash)
 
 
 async def async_add_audio_file_to_cache(hass: HomeAssistant,
