@@ -875,7 +875,7 @@ SETTINGS_FIELDS: tuple[SettingsField, ...] = (
     SettingsField(
         key=INITIAL_DELAY_KEY,
         label="Default initial delay",
-        description="Milliseconds of silence added before generated audio.",
+        description="Milliseconds of silence added before generated audio. A non-zero value replaces the 2000 ms Google Cast default.",
         field_type="number",
         section="playback",
         required=True,

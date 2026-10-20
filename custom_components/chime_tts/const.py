@@ -29,6 +29,10 @@ OFFSET_KEY = "offset"
 DEFAULT_OFFSET_MS = 450
 CROSSFADE_KEY = "crossfade"
 INITIAL_DELAY_KEY = "initial_delay"
+# The Cast default media receiver clips the first second or two of playback
+# while it starts. Prepended once for Cast targets when no initial_delay is set.
+CAST_LEADING_SILENCE_KEY = "cast_leading_silence"
+DEFAULT_CAST_LEADING_SILENCE_MS = 2000
 
 DATA_STORAGE_KEY = "chime_tts_integration_data"
 AUDIO_PATH_KEY = "audio_path" # <-- Deprecated

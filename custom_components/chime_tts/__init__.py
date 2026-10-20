@@ -110,6 +110,7 @@ from .const import (
     DEFAULT_OFFSET_MS,
     CROSSFADE_KEY,
     INITIAL_DELAY_KEY,
+    CAST_LEADING_SILENCE_KEY,
     CHIME_SETS_KEY,
     CHIME_OFFSETS_KEY,
     DEFAULT_CHIME_OFFSETS,
@@ -960,6 +961,61 @@ def _repeat_audio_segment(
     return repeated_audio
 
 
+def _prepend_silence(audio_segment: AudioSegment, duration_ms: float) -> AudioSegment:
+    """Prepend silence in the audio's own frame rate, channels and sample width."""
+    silence = AudioSegment.silent(
+        duration=duration_ms,
+        frame_rate=audio_segment.frame_rate,
+    ).set_channels(audio_segment.channels).set_sample_width(audio_segment.sample_width)
+    return silence + audio_segment
+
+
+async def async_apply_repeat_and_cast_leading_silence(
+    hass: HomeAssistant, audio_segment: AudioSegment, params: dict
+) -> AudioSegment:
+    """Repeat the assembled audio, then pad its start once for Cast receivers."""
+    # Repeat the whole assembled chime + message audio (#314). Done at the
+    # audio level so the chimes repeat too, not just the message segments.
+    # `repeat` is the number of plays after the initial playback.
+    additional_repeats = params.get("repeat", 0)
+    additional_repeats = max(additional_repeats, 0) if isinstance(additional_repeats, int) else 0
+    if additional_repeats > 0:
+        total_plays = additional_repeats + 1
+        try:
+            repeat_delay = max(float(params.get("repeat_delay", 0) or 0), 0)
+        except (TypeError, ValueError):
+            repeat_delay = 0
+        _LOGGER.info(
+            " *** Repeating assembled Chime TTS audio %d additional times (%d total plays) with a %.3f-second delay between plays.",
+            additional_repeats,
+            total_plays,
+            repeat_delay / 1000,
+        )
+        audio_segment = await hass.async_add_executor_job(
+            _repeat_audio_segment,
+            audio_segment,
+            total_plays,
+            repeat_delay,
+        )
+        _LOGGER.info(
+            "   - Repeated Chime TTS audio is ready: %d plays, %.3f seconds total duration.",
+            total_plays,
+            len(audio_segment) / 1000,
+        )
+
+    # After the repeat so it precedes the first play only.
+    cast_leading_silence = params.get(CAST_LEADING_SILENCE_KEY, 0) or 0
+    if cast_leading_silence > 0:
+        _LOGGER.debug(
+            " - Adding %sms of leading silence for Google Cast playback",
+            cast_leading_silence,
+        )
+        audio_segment = await hass.async_add_executor_job(
+            _prepend_silence, audio_segment, cast_leading_silence
+        )
+    return audio_segment
+
+
 async def async_get_playback_audio_path(params: dict, options: dict):
     """Create audio to play on media player entity."""
     output_audio = None
@@ -1046,6 +1102,13 @@ async def async_get_playback_audio_path(params: dict, options: dict):
     if output_audio is not None and initial_delay > 0:
         output_audio = AudioSegment.silent(duration=initial_delay) + output_audio
 
+    # Before the file is written, so cover art, FFmpeg conversion and the
+    # public copy all carry the final timeline.
+    if output_audio is not None:
+        output_audio = await async_apply_repeat_and_cast_leading_silence(
+            hass, output_audio, params
+        )
+
     # Save generated audio file
     audio_dict = {
         AUDIO_DURATION_KEY: 0,
@@ -1098,35 +1161,6 @@ async def async_get_playback_audio_path(params: dict, options: dict):
             raise ValueError("The file format is not supported or the file is corrupted.")
         except Exception as e:
             raise RuntimeError(f"An unexpected error occurred: {e}")
-
-        # Repeat the whole assembled chime + message audio (#314). Done at the
-        # audio level so the chimes repeat too, not just the message segments.
-        # `repeat` is the number of plays after the initial playback.
-        additional_repeats = params.get("repeat", 0)
-        additional_repeats = max(additional_repeats, 0) if isinstance(additional_repeats, int) else 0
-        if additional_repeats > 0:
-            total_plays = additional_repeats + 1
-            try:
-                repeat_delay = max(float(params.get("repeat_delay", 0) or 0), 0)
-            except (TypeError, ValueError):
-                repeat_delay = 0
-            _LOGGER.info(
-                " *** Repeating assembled Chime TTS audio %d additional times (%d total plays) with a %.3f-second delay between plays.",
-                additional_repeats,
-                total_plays,
-                repeat_delay / 1000,
-            )
-            new_audio_segment = _repeat_audio_segment(
-                new_audio_segment,
-                total_plays,
-                repeat_delay,
-            )
-            await filesystem_helper.async_export_audio(new_audio_segment, new_audio_file)
-            _LOGGER.info(
-                "   - Repeated Chime TTS audio is ready: %d plays, %.3f seconds total duration.",
-                total_plays,
-                len(new_audio_segment) / 1000,
-            )
 
         duration = len(new_audio_segment) / 1000.0
         audio_dict[AUDIO_DURATION_KEY] = duration
@@ -1198,7 +1232,7 @@ async def async_ensure_sonos_www_copy(hass: HomeAssistant, audio_dict: dict) -> 
     (home-assistant/core#88714). /local/ is served without an auth check.
 
     The copy is made from the processed local file rather than reusing
-    PUBLIC_PATH_KEY, which holds audio saved before repeat and FFmpeg
+    PUBLIC_PATH_KEY, which holds audio saved before FFmpeg
     processing when Alexa players are targeted in the same call.
     Returns True when a new copy was made.
     """
@@ -2246,7 +2280,13 @@ def get_filename_hash_from_service_data(params: dict, options: dict):
     except (TypeError, ValueError):
         has_additional_repeats = False
     if has_additional_repeats:
-        unique_string += "-repeat-semantics-additional-plays-v1"
+        unique_string += "-repeat-semantics-additional-plays-v2"
+
+    # Labelled so it never collides with an equal initial_delay, which is
+    # repeated per play rather than added once.
+    cast_leading_silence = params.get(CAST_LEADING_SILENCE_KEY, 0)
+    if cast_leading_silence:
+        unique_string += f"-cast-leading-silence-{cast_leading_silence}"
 
     hash_value = filesystem_helper.get_hash_for_string(unique_string)
     return hash_value
