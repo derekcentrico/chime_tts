@@ -1743,6 +1743,20 @@ def _has_posix_acl(path: str, name: str = "system.posix_acl_access") -> bool:
         return False
 
 
+def _has_extra_xattrs(path: str) -> bool:
+    """Return whether path has extended attributes a rename would not carry over.
+
+    The SELinux label is compared separately, so it does not count here.
+    """
+    if not hasattr(os, "listxattr"):
+        return False
+    try:
+        names = os.listxattr(path)
+    except OSError:
+        return False
+    return any(name != "security.selinux" for name in names)
+
+
 def _selinux_label(path: str) -> bytes | None:
     """Return the SELinux label of path, or None if unset or unsupported."""
     if not hasattr(os, "getxattr"):
@@ -1816,7 +1830,7 @@ def _write_text_atomically(path: str, content: str) -> None:
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), target)
     directory = os.path.dirname(target)
     # A rename would detach other hard links from the new content.
-    if current.st_nlink > 1 or _has_posix_acl(target) or _has_posix_acl(
+    if current.st_nlink > 1 or _has_extra_xattrs(target) or _has_posix_acl(
         directory, "system.posix_acl_default"
     ):
         _write_text_in_place(target, content)

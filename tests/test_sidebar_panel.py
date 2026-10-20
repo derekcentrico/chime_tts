@@ -2955,3 +2955,28 @@ def test_issue_352_unlabeled_target_keeps_its_selinux_state(
 
     assert (config_file.stat().st_ino != inode) is replaced
     assert _saved_profile_names(config_file) == ["arrival"]
+
+
+def test_issue_352_file_with_other_xattrs_writes_in_place(tmp_path: Path) -> None:
+    """Extended attributes such as user.* tags survive a profile save."""
+    config_file = tmp_path / "configuration.yaml"
+    config_file.write_text("old: 1\n", encoding="utf-8")
+    try:
+        os.setxattr(config_file, "user.backup", b"keep")
+    except (AttributeError, OSError):
+        pytest.skip("user xattrs not supported here")
+    inode = config_file.stat().st_ino
+
+    settings_module._write_text_atomically(str(config_file), "new: 2\n")
+
+    assert config_file.stat().st_ino == inode
+    assert os.getxattr(config_file, "user.backup") == b"keep"
+    assert config_file.read_text(encoding="utf-8") == "new: 2\n"
+
+
+def test_issue_352_extra_xattr_detection_ignores_selinux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only attributes other than the separately compared SELinux label count."""
+    monkeypatch.setattr(settings_module.os, "listxattr", lambda path: ["security.selinux"])
+    assert settings_module._has_extra_xattrs("/config/configuration.yaml") is False
+    monkeypatch.setattr(settings_module.os, "listxattr", lambda path: ["security.selinux", "user.note"])
+    assert settings_module._has_extra_xattrs("/config/configuration.yaml") is True
