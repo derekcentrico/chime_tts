@@ -2459,3 +2459,25 @@ def test_issue_309_squeezebox_members_volume_set_when_leader_sends_none(monkeypa
 
     _, helper = _squeezebox_helper(monkeypatch, [cast_leader, member], join_players=True)
     assert helper.get_uses_announce_volume(member) is False
+
+
+async def test_failed_alexa_conversion_still_sends_the_file(monkeypatch):
+    """A failed Alexa FFmpeg conversion falls back to the original file instead of crashing."""
+    from unittest.mock import AsyncMock
+
+    alexa = _squeezebox_player("media_player.echo", 0.4, platform="alexa_media", announce_supported=False)
+    integration, _ = _squeezebox_helper(monkeypatch, [alexa])
+    monkeypatch.setattr(
+        integration.filesystem_helper, "async_is_audio_alexa_compatible", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(integration.helpers, "async_ffmpeg_convert_from_file", AsyncMock(return_value=False))
+
+    calls = await integration.async_prepare_media_service_calls(
+        None,
+        [alexa.entity_id],
+        _squeezebox_service_data(),
+        {"public_path": "https://ha.local/local/chime_tts/a.mp3"},
+    )
+
+    assert calls[-1]["service"] == "alexa_media"
+    assert "https://ha.local/local/chime_tts/a.mp3" in calls[-1]["service_data"]["message"]
