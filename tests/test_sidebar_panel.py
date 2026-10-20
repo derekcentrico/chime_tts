@@ -2934,3 +2934,24 @@ def test_issue_352_replace_fsyncs_the_directory(tmp_path: Path, monkeypatch) -> 
 
     assert config_file.read_text(encoding="utf-8") == "new: 2\n"
     assert synced == [str(tmp_path)]
+
+
+@pytest.mark.parametrize(("temp_label", "replaced"), [(b"config_t", False), (None, True)])
+def test_issue_352_unlabeled_target_keeps_its_selinux_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, temp_label: bytes | None, replaced: bool
+) -> None:
+    """An unlabeled configuration.yaml is not swapped for a newly labeled temp file."""
+    hass, _config_entry, paths = make_hass(tmp_path)
+    config_file = paths["config_dir"].joinpath("configuration.yaml")
+    _write_profile_config(config_file)
+    inode = config_file.stat().st_ino
+    monkeypatch.setattr(
+        settings_module,
+        "_selinux_label",
+        lambda path: temp_label if _is_temp_file(path) else None,
+    )
+
+    _save_arrival_profile(hass)
+
+    assert (config_file.stat().st_ino != inode) is replaced
+    assert _saved_profile_names(config_file) == ["arrival"]

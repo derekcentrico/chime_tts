@@ -1772,8 +1772,9 @@ def _temp_matches_target(temp_path: str, target: str, current: os.stat_result) -
     # mkstemp can inherit a default ACL from the directory.
     if _has_posix_acl(temp_path):
         return False
-    target_label = _selinux_label(target)
-    return target_label is None or target_label == _selinux_label(temp_path)
+    # Compare both ways, including None: an unlabeled file must not pick up the
+    # label new files get in that directory.
+    return _selinux_label(target) == _selinux_label(temp_path)
 
 
 def _fsync_directory(directory: str) -> None:
