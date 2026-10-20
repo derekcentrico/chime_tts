@@ -2416,3 +2416,18 @@ def test_custom_chimes_upload_stays_inside_chimes_folder(tmp_path: Path) -> None
         hass, config_entry, CUSTOM_CHIMES_PATH_KEY, str(paths["custom_chimes_dir"]), "sets/ding.mp3", b"audio"
     )
     assert (paths["custom_chimes_dir"] / "sets" / "ding.mp3").read_bytes() == b"audio"
+
+
+def test_custom_chimes_mutation_guard_resolves_link_parent_segments(tmp_path: Path) -> None:
+    """A path that walks back out through a link must be judged where it really lands."""
+    hass, config_entry, paths = make_hass(tmp_path)
+    outside_dir = paths["config_dir"] / "outside"
+    outside_dir.mkdir()
+    secret = paths["config_dir"] / "secrets.yaml"
+    secret.write_text("api_key: hunter2\n")
+    (paths["custom_chimes_dir"] / "link").symlink_to(outside_dir, target_is_directory=True)
+
+    sneaky = f"{paths['custom_chimes_dir']}/link/../secrets.yaml"
+    with pytest.raises(PermissionError):
+        settings_module.delete_browser_entry(hass, config_entry, CUSTOM_CHIMES_PATH_KEY, sneaky)
+    assert secret.exists()

@@ -2507,13 +2507,17 @@ def _is_path_mutable_for_field(
     values: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether a path may be renamed or deleted from the browser."""
-    normalized_path = os.path.normpath(str(path or "/"))
-    # Judge a symlink by where it lives, not by its target: removing it only
-    # removes the link.
-    located_path = os.path.join(
-        os.path.realpath(os.path.dirname(normalized_path) or "/"),
-        os.path.basename(normalized_path),
-    )
+    raw_path = str(path or "").rstrip("/") or "/"
+    if os.path.basename(raw_path) in {".", ".."}:
+        located_path = os.path.realpath(raw_path)
+    else:
+        # Judge a symlink by where it lives, not by its target: removing it
+        # only removes the link. The parent is resolved as the OS will resolve
+        # it, so "link/../name" cannot hide a path outside the root.
+        located_path = os.path.join(
+            os.path.realpath(os.path.dirname(raw_path) or "/"),
+            os.path.basename(raw_path),
+        )
     current_values = values or get_settings_data(hass, config_entry)
 
     if field_key == CUSTOM_CHIMES_PATH_KEY:
