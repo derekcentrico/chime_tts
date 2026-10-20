@@ -3248,12 +3248,15 @@ def validate_settings(
             normalized[field_key] = _normalize_string(user_input.get(field_key))
             errors[field_key] = str(error)
 
-    temp_folder_in_media_dir = False
+    root_path = get_root_path(hass)
     media_dirs_dict = hass.config.media_dirs or {}
-    for media_dir in media_dirs_dict.values():
-        if _is_subdirectory(media_dir, normalized[TEMP_PATH_KEY]):
-            temp_folder_in_media_dir = True
-            break
+    # The shipped default lives under {root}/media, which is not always a
+    # registered media_dirs entry. The options flow has no override, so
+    # accept it here rather than reject the default on such installs (#306).
+    temp_folder_in_media_dir = any(
+        _is_subdirectory(media_dir, normalized[TEMP_PATH_KEY])
+        for media_dir in [*media_dirs_dict.values(), f"{root_path}/media"]
+    )
     if not temp_folder_in_media_dir and TEMP_PATH_KEY not in allow_invalid_paths:
         errors[TEMP_PATH_KEY] = TEMP_PATH_KEY
 
@@ -3264,7 +3267,6 @@ def validate_settings(
             external_folder_in_external_dirs = True
             break
 
-    root_path = get_root_path(hass)
     if not external_folder_in_external_dirs:
         www_path = normalized[WWW_PATH_KEY]
         if not (
